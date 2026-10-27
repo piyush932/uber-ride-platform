@@ -1,0 +1,69 @@
+# FINAL STEP. Not needed for local runs.
+# Starts MySQL, Eureka and auth. Redis and Kafka start with: docker compose --profile full up -d redis kafka
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["full"]
+    ports:
+      - "6379:6379"
+
+  kafka:
+    image: redpandadata/redpanda:latest
+    profiles: ["full"]
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=internal://0.0.0.0:29092,external://0.0.0.0:9092
+      - --advertise-kafka-addr=internal://kafka:29092,external://localhost:9092
+    ports:
+      - "9092:9092"
+
+  eureka-server:
+    build:
+      context: ./backend
+      args:
+        MODULE: eureka-server
+    ports:
+      - "8761:8761"
+
+  auth-service:
+    build:
+      context: ./backend
+      args:
+        MODULE: auth-service
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_PROFILES_ACTIVE: mysql
+      DB_HOST: mysql
+      EUREKA_URL: http://eureka-server:8761/eureka
+      JWT_SECRET: local-docker-secret-please-change-local-docker-secret
+    depends_on:
+      mysql:
+        condition: service_healthy
+      eureka-server:
+        condition: service_started
+    restart: on-failure
+
+volumes:
+  mysql-data:

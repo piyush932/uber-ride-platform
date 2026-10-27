@@ -1,0 +1,154 @@
+{
+  "info": {
+    "name": "Uber Ride Platform (Phase 1-2)",
+    "description": "Run top to bottom against a running stack. The email is randomised on every run, so the collection can be re-run freely.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "authUrl", "value": "http://localhost:8081" },
+    { "key": "eurekaUrl", "value": "http://localhost:8761" },
+    { "key": "password", "value": "secret123" },
+    { "key": "email", "value": "" },
+    { "key": "token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Auth health",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));",
+          "pm.test('service is UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+        ] } }
+      ],
+      "request": { "method": "GET", "header": [], "url": "{{authUrl}}/actuator/health" }
+    },
+    {
+      "name": "2. Signup",
+      "event": [
+        { "listen": "prerequest", "script": { "type": "text/javascript", "exec": [
+          "pm.collectionVariables.set('email', 'rider' + Date.now() + '@example.com');"
+        ] } },
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 201', () => pm.response.to.have.status(201));",
+          "pm.test('email echoed back', () => pm.expect(pm.response.json().email).to.eql(pm.collectionVariables.get('email')));",
+          "pm.test('password is not returned', () => pm.expect(pm.response.json()).to.not.have.property('password'));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Test Rider\",\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}" },
+        "url": "{{authUrl}}/api/v1/auth/signup"
+      }
+    },
+    {
+      "name": "3. Signup again with same email (expect 409)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 409', () => pm.response.to.have.status(409));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Test Rider\",\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}" },
+        "url": "{{authUrl}}/api/v1/auth/signup"
+      }
+    },
+    {
+      "name": "4. Signup with invalid body (expect 400)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 400', () => pm.response.to.have.status(400));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"\",\n  \"email\": \"not-an-email\",\n  \"password\": \"123\"\n}" },
+        "url": "{{authUrl}}/api/v1/auth/signup"
+      }
+    },
+    {
+      "name": "5. Login",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));",
+          "const body = pm.response.json();",
+          "pm.test('token present', () => pm.expect(body.token).to.be.a('string').and.not.empty);",
+          "pm.collectionVariables.set('token', body.token);"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}" },
+        "url": "{{authUrl}}/api/v1/auth/login"
+      }
+    },
+    {
+      "name": "6. Login with wrong password (expect 401)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 401', () => pm.response.to.have.status(401));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"definitely-wrong\"\n}" },
+        "url": "{{authUrl}}/api/v1/auth/login"
+      }
+    },
+    {
+      "name": "7. Me with token",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));",
+          "pm.test('returns the logged in user', () => pm.expect(pm.response.json().email).to.eql(pm.collectionVariables.get('email')));"
+        ] } }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer {{token}}" } ],
+        "url": "{{authUrl}}/api/v1/auth/me"
+      }
+    },
+    {
+      "name": "8. Me without token (expect 401)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 401', () => pm.response.to.have.status(401));"
+        ] } }
+      ],
+      "request": { "method": "GET", "header": [], "url": "{{authUrl}}/api/v1/auth/me" }
+    },
+    {
+      "name": "9. Me with garbage token (expect 401)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 401', () => pm.response.to.have.status(401));"
+        ] } }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer not.a.real.token" } ],
+        "url": "{{authUrl}}/api/v1/auth/me"
+      }
+    },
+    {
+      "name": "10. auth-service registered in Eureka (needs Eureka running)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));",
+          "pm.test('AUTH-SERVICE is listed', () => pm.expect(pm.response.text().toUpperCase()).to.include('AUTH-SERVICE'));"
+        ] } }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Accept", "value": "application/json" } ],
+        "url": "{{eurekaUrl}}/eureka/apps"
+      }
+    }
+  ]
+}
