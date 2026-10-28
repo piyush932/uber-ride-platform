@@ -1,0 +1,86 @@
+{
+  "info": {
+    "name": "Uber Ride Platform (Phase 5: booking)",
+    "description": "Start location-service (8082), socket-service (8083) and booking-service (8084). Run top to bottom.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "bookingUrl", "value": "http://localhost:8084" },
+    { "key": "locationUrl", "value": "http://localhost:8082" }
+  ],
+  "item": [
+    {
+      "name": "1. Booking health",
+      "request": { "method": "GET", "header": [], "url": "{{bookingUrl}}/actuator/health" }
+    },
+    {
+      "name": "2. Put driver 9001 online",
+      "request": {
+        "method": "PUT",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"latitude\": 12.9720, \"longitude\": 77.5950 }" },
+        "url": "{{locationUrl}}/api/v1/locations/drivers/9001"
+      }
+    },
+    {
+      "name": "3. Create booking (driver 9001 should be picked)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 201', () => pm.response.to.have.status(201));",
+          "const b = pm.response.json();",
+          "pm.test('booking is PENDING', () => pm.expect(b.status).to.eql('PENDING'));",
+          "pm.test('driver 9001 was picked', () => pm.expect(b.candidateDriverId).to.eql(9001));",
+          "pm.collectionVariables.set('bookingId', b.id);"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"passengerId\": 1, \"pickupLatitude\": 12.9716, \"pickupLongitude\": 77.5946, \"dropLatitude\": 12.9352, \"dropLongitude\": 77.6245 }" },
+        "url": "{{bookingUrl}}/api/v1/bookings"
+      }
+    },
+    {
+      "name": "4. Driver 9001 accepts",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));",
+          "pm.test('booking is CONFIRMED', () => pm.expect(pm.response.json().status).to.eql('CONFIRMED'));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"driverId\": 9001 }" },
+        "url": "{{bookingUrl}}/api/v1/bookings/{{bookingId}}/accept"
+      }
+    },
+    {
+      "name": "5. Second driver accepts (expect 409)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 409', () => pm.response.to.have.status(409));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"driverId\": 9002 }" },
+        "url": "{{bookingUrl}}/api/v1/bookings/{{bookingId}}/accept"
+      }
+    },
+    {
+      "name": "6. Get booking",
+      "request": { "method": "GET", "header": [], "url": "{{bookingUrl}}/api/v1/bookings/{{bookingId}}" }
+    },
+    {
+      "name": "7. Cancel booking",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"reason\": \"changed my mind\" }" },
+        "url": "{{bookingUrl}}/api/v1/bookings/{{bookingId}}/cancel"
+      }
+    }
+  ]
+}
