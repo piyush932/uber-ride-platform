@@ -30,6 +30,8 @@
         <module>entity-service</module>
         <module>eureka-server</module>
         <module>auth-service</module>
+        <module>location-service</module>
+        <module>socket-service</module>
     </modules>
 
     <dependencyManagement>

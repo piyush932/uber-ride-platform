@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Driver socket test</title>
+<style>
+  body { font-family: sans-serif; max-width: 720px; margin: 2rem auto; }
+  input, button { margin: .25rem; }
+  pre { background: #111; color: #0f0; padding: 1rem; height: 280px; overflow: auto; }
+</style>
+</head>
+<body>
+<h2>Driver socket test page</h2>
+<p>1. Connect as a driver. 2. Send a test ride request. 3. Accept it.</p>
+<div>
+  Driver id <input id="driverId" value="7" size="5">
+  <button id="connect">Connect</button>
+  <button id="disconnect" disabled>Disconnect</button>
+</div>
+<div>
+  Booking id <input id="bookingId" value="101" size="5">
+  <button id="send" disabled>Send test ride request</button>
+  <button id="accept" disabled>Accept ride</button>
+</div>
+<pre id="log"></pre>
+
+<script src="https://cdn.jsdelivr.net/npm/@stomp/stompjs@7.0.0/bundles/stomp.umd.min.js"></script>
+<script>
+  let client = null;
+  const el = (id) => document.getElementById(id);
+  const log = (text) => { el('log').textContent += new Date().toLocaleTimeString() + '  ' + text + '\n'; };
+
+  el('connect').onclick = () => {
+    const driverId = el('driverId').value;
+    client = new StompJs.Client({ brokerURL: 'ws://' + location.host + '/ws', reconnectDelay: 0 });
+    client.onConnect = () => {
+      log('connected as driver ' + driverId);
+      client.subscribe('/topic/drivers/' + driverId + '/rides', (message) => {
+        const ride = JSON.parse(message.body);
+        el('bookingId').value = ride.bookingId;
+        log('RIDE REQUEST: ' + message.body);
+      });
+      el('connect').disabled = true;
+      el('disconnect').disabled = false;
+      el('send').disabled = false;
+      el('accept').disabled = false;
+    };
+    client.onStompError = (frame) => log('STOMP error: ' + frame.headers['message']);
+    client.onWebSocketError = () => log('WebSocket error - is socket-service running?');
+    client.activate();
+  };
+
+  el('disconnect').onclick = () => {
+    client.deactivate();
+    log('disconnected');
+    el('connect').disabled = false;
+    el('disconnect').disabled = true;
+    el('send').disabled = true;
+    el('accept').disabled = true;
+  };
+
+  el('send').onclick = async () => {
+    const body = {
+      driverId: Number(el('driverId').value),
+      bookingId: Number(el('bookingId').value),
+      passengerId: 1,
+      pickupLatitude: 12.9716,
+      pickupLongitude: 77.5946
+    };
+    const response = await fetch('/api/v1/socket/rides/notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    log('notify REST call returned HTTP ' + response.status);
+  };
+
+  el('accept').onclick = () => {
+    const bookingId = Number(el('bookingId').value);
+    client.subscribe('/topic/bookings/' + bookingId, (message) => log('BOOKING UPDATE: ' + message.body));
+    client.publish({
+      destination: '/app/rides/accept',
+      body: JSON.stringify({ bookingId: bookingId, driverId: Number(el('driverId').value) })
+    });
+    log('sent accept for booking ' + bookingId);
+  };
+</script>
+</body>
+</html>

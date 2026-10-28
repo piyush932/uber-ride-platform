@@ -1,0 +1,134 @@
+{
+  "info": {
+    "name": "Uber Ride Platform (Phase 3-4: location and socket)",
+    "description": "Start location-service (8082) and socket-service (8083) first. Run top to bottom.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "locationUrl", "value": "http://localhost:8082" },
+    { "key": "socketUrl", "value": "http://localhost:8083" }
+  ],
+  "item": [
+    {
+      "name": "1. Location health",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));"
+        ] } }
+      ],
+      "request": { "method": "GET", "header": [], "url": "{{locationUrl}}/actuator/health" }
+    },
+    {
+      "name": "2. Save driver pm-near",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 204', () => pm.response.to.have.status(204));"
+        ] } }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"latitude\": 12.9720, \"longitude\": 77.5950 }" },
+        "url": "{{locationUrl}}/api/v1/locations/drivers/pm-near"
+      }
+    },
+    {
+      "name": "3. Save driver pm-mid",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 204', () => pm.response.to.have.status(204));"
+        ] } }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"latitude\": 12.9800, \"longitude\": 77.6000 }" },
+        "url": "{{locationUrl}}/api/v1/locations/drivers/pm-mid"
+      }
+    },
+    {
+      "name": "4. Nearby drivers (nearest first)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));",
+          "const ids = pm.response.json().map(d => d.driverId).filter(id => id.startsWith('pm-'));",
+          "pm.test('pm-near comes before pm-mid', () => pm.expect(ids).to.eql(['pm-near', 'pm-mid']));"
+        ] } }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{locationUrl}}/api/v1/locations/nearby?lat=12.9716&lng=77.5946&radiusKm=5&limit=50"
+      }
+    },
+    {
+      "name": "5. Bad latitude (expect 400)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 400', () => pm.response.to.have.status(400));"
+        ] } }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"latitude\": 91, \"longitude\": 77 }" },
+        "url": "{{locationUrl}}/api/v1/locations/drivers/pm-near"
+      }
+    },
+    {
+      "name": "6. Take pm-near offline",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 204', () => pm.response.to.have.status(204));"
+        ] } }
+      ],
+      "request": { "method": "DELETE", "header": [], "url": "{{locationUrl}}/api/v1/locations/drivers/pm-near" }
+    },
+    {
+      "name": "7. Take pm-mid offline (cleanup)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 204', () => pm.response.to.have.status(204));"
+        ] } }
+      ],
+      "request": { "method": "DELETE", "header": [], "url": "{{locationUrl}}/api/v1/locations/drivers/pm-mid" }
+    },
+    {
+      "name": "8. Socket health",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));"
+        ] } }
+      ],
+      "request": { "method": "GET", "header": [], "url": "{{socketUrl}}/actuator/health" }
+    },
+    {
+      "name": "9. Notify driver 7 (expect 202)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 202', () => pm.response.to.have.status(202));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"driverId\": 7, \"bookingId\": 101, \"passengerId\": 1, \"pickupLatitude\": 12.9716, \"pickupLongitude\": 77.5946 }" },
+        "url": "{{socketUrl}}/api/v1/socket/rides/notify"
+      }
+    },
+    {
+      "name": "10. Notify without driverId (expect 400)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 400', () => pm.response.to.have.status(400));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"bookingId\": 101 }" },
+        "url": "{{socketUrl}}/api/v1/socket/rides/notify"
+      }
+    }
+  ]
+}
