@@ -5,7 +5,7 @@ import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotNull;
 
-import java.time.Instant;
+import java.time.LocalDateTime;
 
 public final class BookingDtos {
 
@@ -41,7 +41,7 @@ public final class BookingDtos {
         Double dropLatitude,
         Double dropLongitude,
         String cancelReason,
-        Instant createdAt) {
+        LocalDateTime createdAt) {
 
         public static BookingResponse from(Booking booking, Long candidateDriverId) {
             return new BookingResponse(
