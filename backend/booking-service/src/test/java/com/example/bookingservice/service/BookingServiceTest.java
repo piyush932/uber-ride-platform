@@ -143,6 +143,33 @@ class BookingServiceTest {
     }
 
     @Test
+    void completeMarksAConfirmedBookingCompleted() {
+        Booking confirmed = savedBooking(Booking.BookingStatus.CONFIRMED);
+        confirmed.setDriverId(9001L);
+        when(repository.findById(1L)).thenReturn(Optional.of(confirmed));
+        when(repository.save(any(Booking.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        BookingResponse response = service.complete(1L);
+
+        assertEquals(Booking.BookingStatus.COMPLETED.name(), response.status());
+
+        ArgumentCaptor<BookingEvent> event = ArgumentCaptor.forClass(BookingEvent.class);
+        verify(events).publish(event.capture());
+        assertEquals("BOOKING_COMPLETED", event.getValue().type());
+    }
+
+    @Test
+    void completeOnAPendingBookingIsRejected() {
+        when(repository.findById(1L)).thenReturn(Optional.of(savedBooking(Booking.BookingStatus.PENDING)));
+
+        ResponseStatusException error = assertThrows(ResponseStatusException.class,
+            () -> service.complete(1L));
+
+        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+        verify(events, never()).publish(any());
+    }
+
+    @Test
     void cancelMarksAPendingBookingCancelled() {
         Booking pending = savedBooking(Booking.BookingStatus.PENDING);
         when(repository.findById(1L)).thenReturn(Optional.of(pending));

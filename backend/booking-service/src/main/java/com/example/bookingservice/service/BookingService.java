@@ -100,6 +100,24 @@ public class BookingService {
         return BookingResponse.from(booking, booking.getDriverId());
     }
 
+    /** Called when the ride is over. Only a CONFIRMED booking can be completed. */
+    @Transactional
+    public BookingResponse complete(Long bookingId) {
+        Booking booking = repository.findById(bookingId)
+            .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Booking not found"));
+
+        if (booking.getStatus() != Booking.BookingStatus.CONFIRMED) {
+            throw new ResponseStatusException(CONFLICT,
+                "Booking is " + booking.getStatus() + ", only a CONFIRMED booking can be completed");
+        }
+
+        booking.setStatus(Booking.BookingStatus.COMPLETED);
+        booking = repository.save(booking);
+        events.publish(BookingEvent.of(booking.getId(), "BOOKING_COMPLETED",
+            booking.getPassengerId(), booking.getDriverId(), null));
+        return BookingResponse.from(booking, booking.getDriverId());
+    }
+
     @Transactional
     public BookingResponse cancel(Long bookingId, String reason) {
         Booking booking = repository.findById(bookingId)

@@ -1,0 +1,114 @@
+{
+  "info": {
+    "name": "Uber Ride Platform (Phase 6: review)",
+    "description": "Start location (8082), socket (8083), booking (8084) and review (8085). Run top to bottom.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "reviewUrl", "value": "http://localhost:8085" },
+    { "key": "bookingUrl", "value": "http://localhost:8084" },
+    { "key": "locationUrl", "value": "http://localhost:8082" }
+  ],
+  "item": [
+    {
+      "name": "1. Review health",
+      "request": { "method": "GET", "header": [], "url": "{{reviewUrl}}/actuator/health" }
+    },
+    {
+      "name": "2. Put driver 9001 online",
+      "request": {
+        "method": "PUT",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"latitude\": 12.9720, \"longitude\": 77.5950 }" },
+        "url": "{{locationUrl}}/api/v1/locations/drivers/9001"
+      }
+    },
+    {
+      "name": "3. Create booking",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 201', () => pm.response.to.have.status(201));",
+          "pm.collectionVariables.set('bookingId', pm.response.json().id);"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"passengerId\": 1, \"pickupLatitude\": 12.9716, \"pickupLongitude\": 77.5946 }" },
+        "url": "{{bookingUrl}}/api/v1/bookings"
+      }
+    },
+    {
+      "name": "4. Driver 9001 accepts",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"driverId\": 9001 }" },
+        "url": "{{bookingUrl}}/api/v1/bookings/{{bookingId}}/accept"
+      }
+    },
+    {
+      "name": "5. Review before completion (expect 409)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 409', () => pm.response.to.have.status(409));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"bookingId\": {{bookingId}}, \"passengerId\": 1, \"rating\": 5 }" },
+        "url": "{{reviewUrl}}/api/v1/reviews"
+      }
+    },
+    {
+      "name": "6. Complete booking",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));",
+          "pm.test('booking is COMPLETED', () => pm.expect(pm.response.json().status).to.eql('COMPLETED'));"
+        ] } }
+      ],
+      "request": { "method": "POST", "header": [], "url": "{{bookingUrl}}/api/v1/bookings/{{bookingId}}/complete" }
+    },
+    {
+      "name": "7. Create review",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 201', () => pm.response.to.have.status(201));",
+          "pm.test('driver is 9001', () => pm.expect(pm.response.json().driverId).to.eql(9001));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"bookingId\": {{bookingId}}, \"passengerId\": 1, \"rating\": 5, \"comment\": \"Great ride\" }" },
+        "url": "{{reviewUrl}}/api/v1/reviews"
+      }
+    },
+    {
+      "name": "8. Second review (expect 409)",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 409', () => pm.response.to.have.status(409));"
+        ] } }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"bookingId\": {{bookingId}}, \"passengerId\": 1, \"rating\": 4 }" },
+        "url": "{{reviewUrl}}/api/v1/reviews"
+      }
+    },
+    {
+      "name": "9. Driver rating summary",
+      "event": [
+        { "listen": "test", "script": { "type": "text/javascript", "exec": [
+          "pm.test('status is 200', () => pm.response.to.have.status(200));",
+          "pm.test('average is 5', () => pm.expect(pm.response.json().averageRating).to.eql(5));"
+        ] } }
+      ],
+      "request": { "method": "GET", "header": [], "url": "{{reviewUrl}}/api/v1/reviews?driverId=9001" }
+    }
+  ]
+}

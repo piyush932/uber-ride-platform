@@ -39,6 +39,11 @@ public class BookingController {
         return service.accept(id, request);
     }
 
+    @PostMapping("/{id}/complete")
+    public BookingResponse complete(@PathVariable("id") Long id) {
+        return service.complete(id);
+    }
+
     @PostMapping("/{id}/cancel")
     public BookingResponse cancel(@PathVariable("id") Long id, @RequestBody(required = false) CancelBookingRequest request) {
         return service.cancel(id, request == null ? null : request.reason());
