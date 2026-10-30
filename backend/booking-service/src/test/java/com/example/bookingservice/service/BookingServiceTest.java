@@ -8,7 +8,9 @@ import com.example.bookingservice.dto.BookingDtos.BookingResponse;
 import com.example.bookingservice.dto.BookingDtos.CreateBookingRequest;
 import com.example.bookingservice.event.BookingEvent;
 import com.example.bookingservice.event.BookingEventPublisher;
+import com.example.bookingservice.model.IdempotencyRecord;
 import com.example.bookingservice.repository.BookingRepository;
+import com.example.bookingservice.repository.IdempotencyRepository;
 import com.example.entityservice.models.Booking;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,6 +40,9 @@ class BookingServiceTest {
     private BookingRepository repository;
 
     @Mock
+    private IdempotencyRepository idempotencyRepository;
+
+    @Mock
     private LocationClient locationClient;
 
     @Mock
@@ -50,7 +55,7 @@ class BookingServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new BookingService(repository, locationClient, socketClient, events, 5.0);
+        service = new BookingService(repository, idempotencyRepository, locationClient, socketClient, events, 5.0);
     }
 
     private CreateBookingRequest createRequest() {
@@ -80,7 +85,7 @@ class BookingServiceTest {
         when(locationClient.findNearby(12.9716, 77.5946))
             .thenReturn(List.of(new NearbyDriver("9001", 0.5, 12.972, 77.595)));
 
-        BookingResponse response = service.create(createRequest());
+        BookingResponse response = service.create(createRequest(), null);
 
         assertEquals(Booking.BookingStatus.PENDING.name(), response.status());
         assertEquals(9001L, response.candidateDriverId());
@@ -90,6 +95,22 @@ class BookingServiceTest {
         verify(events).publish(event.capture());
         assertEquals("DRIVER_NOTIFIED", event.getValue().type());
         assertEquals(9001L, event.getValue().driverId());
+    }
+
+    @Test
+    void sameIdempotencyKeyReturnsTheSameBooking() {
+        Booking existing = savedBooking(Booking.BookingStatus.PENDING);
+        when(idempotencyRepository.findByIdempotencyKey("abc-123"))
+            .thenReturn(Optional.of(IdempotencyRecord.builder()
+                .idempotencyKey("abc-123")
+                .bookingId(1L)
+                .build()));
+        when(repository.findById(1L)).thenReturn(Optional.of(existing));
+
+        BookingResponse response = service.create(createRequest(), "abc-123");
+
+        assertEquals(1L, response.id());
+        verify(locationClient, never()).findNearby(anyDouble(), anyDouble());
     }
 
     @Test
@@ -104,7 +125,7 @@ class BookingServiceTest {
         when(locationClient.findNearby(12.9716, 77.5946)).thenReturn(List.of());
 
         ResponseStatusException error = assertThrows(ResponseStatusException.class,
-            () -> service.create(createRequest()));
+            () -> service.create(createRequest(), null));
 
         assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
         verify(socketClient, never()).notifyDriver(anyLong(), anyLong(), anyLong(), anyDouble(), anyDouble());

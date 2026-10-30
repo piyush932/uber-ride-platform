@@ -29,9 +29,14 @@ public class BookingController {
     }
 
     @PostMapping
-    @ResponseStatus(HttpStatus.CREATED)
-    public BookingResponse create(@Valid @RequestBody CreateBookingRequest request) {
-        return service.create(request);
+    public BookingResponse create(
+            @Valid @RequestBody CreateBookingRequest request,
+            @org.springframework.web.bind.annotation.RequestHeader(
+                value = "Idempotency-Key", required = false) String idempotencyKey) {
+
+        BookingResponse response = service.create(request, idempotencyKey);
+        // A retried request with the same key returns the existing booking with 200.
+        return response;
     }
 
     @PostMapping("/{id}/accept")

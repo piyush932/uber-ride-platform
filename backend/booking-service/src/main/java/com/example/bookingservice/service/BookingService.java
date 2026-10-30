@@ -8,7 +8,9 @@ import com.example.bookingservice.dto.BookingDtos.BookingResponse;
 import com.example.bookingservice.dto.BookingDtos.CreateBookingRequest;
 import com.example.bookingservice.event.BookingEvent;
 import com.example.bookingservice.event.BookingEventPublisher;
+import com.example.bookingservice.model.IdempotencyRecord;
 import com.example.bookingservice.repository.BookingRepository;
+import com.example.bookingservice.repository.IdempotencyRepository;
 import com.example.entityservice.models.Booking;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.OptimisticLockingFailureException;
@@ -18,6 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.springframework.http.HttpStatus.CONFLICT;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
@@ -26,25 +29,42 @@ import static org.springframework.http.HttpStatus.NOT_FOUND;
 public class BookingService {
 
     private final BookingRepository repository;
+    private final IdempotencyRepository idempotencyRepository;
     private final LocationClient locationClient;
     private final SocketClient socketClient;
     private final BookingEventPublisher events;
     private final double searchRadiusKm;
 
     public BookingService(BookingRepository repository,
+                          IdempotencyRepository idempotencyRepository,
                           LocationClient locationClient,
                           SocketClient socketClient,
                           BookingEventPublisher events,
                           @Value("${booking.search.radius-km:5}") double searchRadiusKm) {
         this.repository = repository;
+        this.idempotencyRepository = idempotencyRepository;
         this.locationClient = locationClient;
         this.socketClient = socketClient;
         this.events = events;
         this.searchRadiusKm = searchRadiusKm;
     }
 
+    /**
+     * With an Idempotency-Key header, a retried request returns the same booking
+     * (HTTP 200) instead of creating a second one.
+     */
     @Transactional
-    public BookingResponse create(CreateBookingRequest request) {
+    public BookingResponse create(CreateBookingRequest request, String idempotencyKey) {
+        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            Optional<IdempotencyRecord> existing =
+                idempotencyRepository.findByIdempotencyKey(idempotencyKey);
+            if (existing.isPresent()) {
+                Booking booking = repository.findById(existing.get().getBookingId())
+                    .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Booking not found"));
+                return BookingResponse.from(booking, booking.getDriverId());
+            }
+        }
+
         Booking booking = Booking.builder()
             .status(Booking.BookingStatus.PENDING)
             .passengerId(request.passengerId())
@@ -55,25 +75,37 @@ public class BookingService {
             .build();
         booking = repository.save(booking);
 
-        List<NearbyDriver> drivers = locationClient.findNearby(
-            request.pickupLatitude(), request.pickupLongitude());
+        try {
+            List<NearbyDriver> drivers = locationClient.findNearby(
+                request.pickupLatitude(), request.pickupLongitude());
 
-        if (drivers == null || drivers.isEmpty()) {
-            booking.setStatus(Booking.BookingStatus.CANCELLED);
-            booking.setCancelReason("NO_DRIVERS_NEARBY");
-            booking = repository.save(booking);
-            events.publish(BookingEvent.of(booking.getId(), "BOOKING_CANCELLED",
-                booking.getPassengerId(), null, booking.getCancelReason()));
-            throw new ResponseStatusException(CONFLICT, "No drivers nearby");
+            if (drivers == null || drivers.isEmpty()) {
+                booking.setStatus(Booking.BookingStatus.CANCELLED);
+                booking.setCancelReason("NO_DRIVERS_NEARBY");
+                booking = repository.saveAndFlush(booking);
+                events.publish(BookingEvent.of(booking.getId(), "BOOKING_CANCELLED",
+                    booking.getPassengerId(), null, booking.getCancelReason()));
+                saveIdempotencyKey(idempotencyKey, booking.getId());
+                throw new ResponseStatusException(CONFLICT, "No drivers nearby");
+            }
+
+            long candidateDriverId = parseDriverId(drivers.get(0).driverId());
+            socketClient.notifyDriver(candidateDriverId, booking.getId(), booking.getPassengerId(),
+                booking.getPickupLatitude(), booking.getPickupLongitude());
+            events.publish(BookingEvent.of(booking.getId(), "DRIVER_NOTIFIED",
+                booking.getPassengerId(), candidateDriverId, null));
+
+            saveIdempotencyKey(idempotencyKey, booking.getId());
+            return BookingResponse.from(booking, candidateDriverId);
+        } catch (ResponseStatusException e) {
+            // A cancelled booking must survive: only undo the booking if it is still PENDING.
+            if (booking.getStatus() == Booking.BookingStatus.PENDING) {
+                booking.setStatus(Booking.BookingStatus.CANCELLED);
+                booking.setCancelReason("BOOKING_FAILED");
+                repository.save(booking);
+            }
+            throw e;
         }
-
-        long candidateDriverId = parseDriverId(drivers.get(0).driverId());
-        socketClient.notifyDriver(candidateDriverId, booking.getId(), booking.getPassengerId(),
-            booking.getPickupLatitude(), booking.getPickupLongitude());
-        events.publish(BookingEvent.of(booking.getId(), "DRIVER_NOTIFIED",
-            booking.getPassengerId(), candidateDriverId, null));
-
-        return BookingResponse.from(booking, candidateDriverId);
     }
 
     /** Called by socket-service when a driver accepts. The version column makes a second accept fail. */
@@ -146,6 +178,16 @@ public class BookingService {
         return repository.findByPassengerIdOrderByCreatedAtDesc(passengerId).stream()
             .map(b -> BookingResponse.from(b, b.getDriverId()))
             .toList();
+    }
+
+    private void saveIdempotencyKey(String key, Long bookingId) {
+        if (key == null || key.isBlank()) {
+            return;
+        }
+        idempotencyRepository.save(IdempotencyRecord.builder()
+            .idempotencyKey(key)
+            .bookingId(bookingId)
+            .build());
     }
 
     private static long parseDriverId(String driverId) {

@@ -34,6 +34,7 @@
         <module>socket-service</module>
         <module>booking-service</module>
         <module>review-service</module>
+        <module>api-gateway</module>
     </modules>
 
     <dependencyManagement>

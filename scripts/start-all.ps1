@@ -2,9 +2,9 @@
 # Build first:  .\scripts\mvn.ps1 clean install -DskipTests
 # Usage (from the repo root):  .\scripts\start-all.ps1
 # Everything starts with the in-memory defaults. To use your local MySQL / Redis, start
-# auth, location and booking by hand with the profiles shown in the README instead.
+# auth, location, booking and review by hand with the profiles shown in the README instead.
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$services = @('eureka-server', 'auth-service', 'location-service', 'socket-service', 'booking-service')
+$services = @('eureka-server', 'auth-service', 'location-service', 'socket-service', 'booking-service', 'review-service', 'api-gateway')
 
 foreach ($name in $services) {
     $jar = Join-Path $repoRoot ('backend\' + $name + '\target\' + $name + '.jar')
@@ -25,3 +25,4 @@ foreach ($name in $services) {
 
 Write-Host ''
 Write-Host 'All services are starting. Give them about 30 seconds, then open http://localhost:8761'
+Write-Host 'Gateway: http://localhost:8080'

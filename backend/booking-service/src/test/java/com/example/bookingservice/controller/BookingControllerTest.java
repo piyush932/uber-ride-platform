@@ -15,6 +15,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.server.ResponseStatusException;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -40,13 +41,14 @@ class BookingControllerTest {
     }
 
     @Test
-    void createReturns201() throws Exception {
-        when(service.create(any(CreateBookingRequest.class))).thenReturn(sample());
+    void createReturnsTheBooking() throws Exception {
+        when(service.create(any(CreateBookingRequest.class), eq("abc-123"))).thenReturn(sample());
 
         mvc.perform(post("/api/v1/bookings")
+                .header("Idempotency-Key", "abc-123")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"passengerId\":1,\"pickupLatitude\":12.9716,\"pickupLongitude\":77.5946}"))
-            .andExpect(status().isCreated())
+            .andExpect(status().isOk())
             .andExpect(jsonPath("$.id").value(1))
             .andExpect(jsonPath("$.status").value("PENDING"))
             .andExpect(jsonPath("$.candidateDriverId").value(9001));

@@ -1,0 +1,65 @@
+# Active with SPRING_PROFILES_ACTIVE=redis (uses your local Redis).
+# Limits each client IP to 10 requests per 10 seconds per route.
+spring.data.redis.host=${REDIS_HOST:localhost}
+spring.data.redis.port=${REDIS_PORT:6379}
+
+spring.cloud.gateway.server.webflux.routes:
+  - id: auth
+    uri: lb://AUTH-SERVICE
+    predicates:
+      - Path=/api/v1/auth/**
+    filters:
+      - name: RequestRateLimiter
+        args:
+          redis-rate-limiter.replenishRate: 1
+          redis-rate-limiter.burstCapacity: 10
+          redis-rate-limiter.requestedTokens: 1
+      - name: CircuitBreaker
+        args:
+          name: authCB
+          fallbackUri: forward:/fallback/auth
+
+  - id: bookings
+    uri: lb://BOOKING-SERVICE
+    predicates:
+      - Path=/api/v1/bookings/**
+    filters:
+      - name: RequestRateLimiter
+        args:
+          redis-rate-limiter.replenishRate: 1
+          redis-rate-limiter.burstCapacity: 10
+          redis-rate-limiter.requestedTokens: 1
+      - name: CircuitBreaker
+        args:
+          name: bookingCB
+          fallbackUri: forward:/fallback/booking
+
+  - id: locations
+    uri: lb://LOCATION-SERVICE
+    predicates:
+      - Path=/api/v1/locations/**
+    filters:
+      - name: RequestRateLimiter
+        args:
+          redis-rate-limiter.replenishRate: 1
+          redis-rate-limiter.burstCapacity: 10
+          redis-rate-limiter.requestedTokens: 1
+      - name: CircuitBreaker
+        args:
+          name: locationCB
+          fallbackUri: forward:/fallback/location
+
+  - id: reviews
+    uri: lb://REVIEW-SERVICE
+    predicates:
+      - Path=/api/v1/reviews/**
+    filters:
+      - name: RequestRateLimiter
+        args:
+          redis-rate-limiter.replenishRate: 1
+          redis-rate-limiter.burstCapacity: 10
+          redis-rate-limiter.requestedTokens: 1
+      - name: CircuitBreaker
+        args:
+          name: reviewCB
+          fallbackUri: forward:/fallback/review
