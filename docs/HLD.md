@@ -6,11 +6,11 @@ This document covers the whole target system, and says clearly which parts exist
 
 Simulate the core flow of a ride-hailing app: a passenger requests a ride, nearby drivers are found, one driver is notified instantly, accepts, the ride is completed, and the passenger can review the driver. The point is to practise the distributed-systems problems behind that flow, not to clone a product.
 
-## 2. What is built (Phase 1-7)
+## 2. What is built (Phase 1-8)
 
 ```mermaid
 flowchart LR
-    C[Client] -->|HTTP + JWT| GW[api-gateway :8080]
+    UI[React passenger app :5173] -->|HTTP + JWT| GW[api-gateway :8080]
     GW -->|JWT check| A[auth-service :8081]
     GW --> B[booking-service :8084]
     GW --> L[location-service :8082]
@@ -55,7 +55,7 @@ flowchart TB
     AUTH & BOOK & LOC & SOCK & REV & GW --> EU[Eureka]
 ```
 
-Phase 8 adds the React frontend. The final phase adds Docker Compose for every service with MySQL, Redis and Kafka.
+Phase 8 adds the React passenger frontend (built): login/signup, Leaflet map booking with an idempotency key, ride status by polling every 3 seconds, and a my-rides list. Live WebSocket push to the passenger screen and the driver panel are deferred to a later phase. The final phase adds Docker Compose for every service with MySQL, Redis and Kafka.
 
 ## 4. Local mode and Docker mode
 
@@ -96,20 +96,22 @@ sequenceDiagram
     Note over GW,S: circuit breaker per route, JSON 503 fallback when open
 ```
 
-Routes: `/api/v1/auth/**` to auth-service, `/api/v1/bookings/**` to booking-service, `/api/v1/locations/**` to location-service, `/api/v1/reviews/**` to review-service, all via Eureka (`lb://`). Socket-service REST is not exposed through the gateway; drivers use WebSocket and booking-service calls it internally.
+Routes: `/api/v1/auth/**` to auth-service, `/api/v1/bookings/**` to booking-service, `/api/v1/locations/**` to location-service, `/api/v1/reviews/**` to review-service, all via Eureka (`lb://`). Socket-service REST is not exposed through the gateway; drivers use WebSocket and booking-service calls it internally. The gateway allows browser calls only from `http://localhost:5173` (CORS).
 
 ## 6. Ride request flow (built)
 
 ```mermaid
 sequenceDiagram
     participant P as Passenger
+    participant UI as React app
     participant GW as api-gateway
     participant B as booking-service
     participant L as location-service
     participant S as socket-service
     participant D as Driver app
 
-    P->>GW: POST /bookings (Idempotency-Key)
+    P->>UI: pick pickup and dropoff on the map
+    UI->>GW: POST /bookings (Idempotency-Key)
     GW->>GW: JWT check
     GW->>B: forward
     B->>B: idempotency key seen? return same booking
@@ -123,6 +125,7 @@ sequenceDiagram
     B->>B: PENDING to CONFIRMED (version check)
     B-->>S: 200 confirmed
     S-->>D: /topic/bookings/{id} CONFIRMED
+    UI->>GW: GET /bookings/{id} every 3s (polling)
     P->>GW: POST /bookings/{id}/complete
     GW->>B: forward
     B->>B: CONFIRMED to COMPLETED + BOOKING_COMPLETED event
@@ -190,10 +193,12 @@ Booking references passengers and drivers by plain id, not by a foreign key, bec
 | `ddl-auto=update` | Fast to develop against | Not for production; I'd switch to Flyway migrations |
 | Spring Boot 3.5.16 | Supports Java 17 to 25 | Boot 3.5 no longer gets free security patches; moving to Boot 4.x is a later upgrade |
 | Maven multi-module build | One parent POM pins versions for every service | A change to the library rebuilds its dependants |
+| React + Vite + Leaflet for the passenger UI | Fast dev server, free map tiles, no API key | Status polling is simpler than WebSocket but less instant; WebSocket push is planned |
 
 ## 10. Known gaps
 
 - No refresh tokens or email verification, and only passengers can log in so far (driver login is not built).
+- The passenger UI polls booking status every 3 seconds instead of subscribing over WebSocket; live push is planned with the driver panel.
 - Booking only tries the single nearest driver. There is no timeout, no re-dispatch to the next driver if they ignore the ride, and the chosen driver (`candidateDriverId`) is returned on create but not stored, so `accept` does not check that the accepting driver is the one who was notified.
 - Booking driver ids must be numeric, while location accepts any string id.
 - The idempotency key is stored forever; production would add a TTL or cleanup job.
@@ -206,5 +211,6 @@ Booking references passengers and drivers by plain id, not by a foreign key, bec
 
 ## 11. Roadmap
 
-8. **React frontend**: booking form, live driver map (Leaflet + OpenStreetMap, free), login screen, ride status via WebSocket.
-9. **Docker**: Compose for every service with MySQL, Redis and Kafka, a Kafka consumer in review-service, and a full Docker test guide.
+8. **React passenger frontend**: DONE — login, Leaflet map booking, status polling, my rides.
+9. **Driver panel + live push**: driver login, go online, position updates, WebSocket subscription for ride requests and booking status.
+10. **Docker**: Compose for every service with MySQL, Redis and Kafka, a Kafka consumer in review-service, and a full Docker test guide.

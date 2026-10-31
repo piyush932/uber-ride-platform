@@ -8,6 +8,12 @@ spring:
     gateway:
       server:
         webflux:
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowedOriginPatterns: "http://localhost:5173"
+                allowedMethods: "*"
+                allowedHeaders: "*"
           routes:
             - id: auth
               uri: lb://AUTH-SERVICE

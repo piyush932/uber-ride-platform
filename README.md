@@ -2,7 +2,7 @@
 
 A ride-hailing backend I'm building phase by phase to practise real microservice problems: service discovery, stateless auth, geospatial search, real-time push, event-driven flows, cross-service rules and edge resilience. Every phase is small enough to run and test on its own.
 
-Stack: Java (builds to Java 17 bytecode, runs on 17 to 25), Spring Boot 3.5.16, Spring Cloud 2025.0.3, Maven.
+Stack: Java (builds to Java 17 bytecode, runs on 17 to 25), Spring Boot 3.5.16, Spring Cloud 2025.0.3, Maven. Frontend: React 18 + Vite + Leaflet.
 
 The plan is: **run and test everything locally first** (no Docker needed), then switch to Docker at the end. Every service runs with in-memory defaults, and also supports real MySQL / Redis / Kafka through Spring profiles.
 
@@ -16,9 +16,9 @@ The plan is: **run and test everything locally first** (no Docker needed), then 
 | 4 | Socket service (WebSocket/STOMP push to drivers) | Done |
 | 5 | Booking service (orchestrates location + socket, race-safe accept, events) | Done |
 | 6 | Review service (ratings for completed bookings) | Done |
-| 7 | API gateway (JWT check, circuit breakers, optional rate limiting), booking idempotency | Done (needs your local run to confirm) |
-| 8 | React frontend (booking form + live map) | Next |
-| Final | Docker Compose with MySQL, Redis, Kafka | Planned |
+| 7 | API gateway (JWT check, circuit breakers, optional rate limiting), booking idempotency | Done |
+| 8 | React passenger frontend (login, Leaflet map booking, live status, my rides) | Done (needs your local run to confirm) |
+| Final | Docker Compose with MySQL, Redis, Kafka; driver panel and WebSocket push to the UI | Planned |
 
 [docs/HLD.md](docs/HLD.md) describes the full target design and marks what is built.
 
@@ -33,6 +33,7 @@ The plan is: **run and test everything locally first** (no Docker needed), then 
 - **What if the passenger retries?** With an `Idempotency-Key` header, the same key returns the same booking instead of creating a second one.
 - **How does a ride end?** A confirmed booking can be completed, which is the trigger for a review.
 - **How is a driver rated?** The review service accepts one review per completed booking, from the passenger who made it, and computes a driver's average rating.
+- **What does the passenger see?** A responsive web app: log in, pick pickup and dropoff on a map, book, watch the ride status, and see past rides.
 
 ## Repo layout
 
@@ -47,6 +48,7 @@ uber-ride-platform/
     smoke-test-booking.ps1    13 automated checks for booking
     smoke-test-review.ps1     13 automated checks for review
     smoke-test-gateway.ps1    automated checks for the gateway
+  frontend/                   React passenger app (Vite + Leaflet)
   backend/                    Maven multi-module build (parent pom.xml)
     entity-service/           shared JPA entities (library)
     eureka-server/            service registry          :8761
@@ -64,14 +66,15 @@ uber-ride-platform/
 ## What you need on your laptop
 
 - A JDK, version 17 or newer (JDK 25 works). `java -version` must print a version, and `JAVA_HOME` should point at the JDK folder.
+- Node.js 18 or newer for the frontend (`node -v` must print a version).
 - Nothing else for the in-memory mode. Maven is downloaded for you by `scripts/mvn.ps1`.
 - Optional: MySQL 8 (auth, booking, review) and Redis (location; also gateway rate limiting). Kafka is not needed until the Docker stage.
-- A browser with internet access for the socket test page (it loads stomp.js from a CDN).
-- Optional: Postman, IntelliJ IDEA.
+- A browser with internet access for the map tiles and the socket test page.
+- Optional: Postman, IntelliJ IDEA, VS Code.
 
-## Build and start (Windows PowerShell)
+## Build and start the backend (Windows PowerShell)
 
-Open PowerShell in the repo root (the folder that contains `backend` and `scripts`).
+Open PowerShell in the repo root (the folder that contains `backend`, `frontend` and `scripts`).
 
 **Step 1: allow the helper scripts for this window only**
 
@@ -127,6 +130,30 @@ The MySQL profile creates the databases `uber_auth`, `uber_booking` and `uber_re
 
 Eureka is optional: set `$env:EUREKA_ENABLED='false'` in a window before starting a service there and it runs on its own.
 
+## Run the frontend (Phase 8)
+
+In a new PowerShell window, from the repo root:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open http://localhost:5173. The frontend calls the gateway at http://localhost:8080 (change it with `VITE_API_URL` in a `.env` file if needed).
+
+**Test the passenger flow**
+
+1. Sign up with an email and password (or log in if you already have an account).
+2. You land on the booking screen with a map.
+3. Tap the map once for pickup (green), once more for dropoff (red).
+4. Press **Book ride**. You are taken to the ride status screen.
+5. The status screen refreshes every 3 seconds. With a driver online near the pickup, the booking should reach `CONFIRMED` after the driver accepts in the socket test page.
+6. Use **Cancel ride** (pending/confirmed) or **Complete ride** (confirmed) to change the state.
+7. Open **My rides** to see all your bookings and reopen any of them.
+
+Known limitation: the passenger UI polls the booking every 3 seconds; live WebSocket push to the passenger screen is planned with the driver panel.
+
 ## Test Phase 2: auth
 
 ```powershell
@@ -161,53 +188,23 @@ Known cosmetic issue: on Windows PowerShell 5.1 the line `health status is UP` c
 
 ## Test Phase 7: gateway
 
-**A. Automated**
-
 ```powershell
 .\scripts\smoke-test-gateway.ps1
 ```
 
 It signs up and logs in through the gateway, checks that bookings without a token give 401 and with a garbage token give 401, calls `/me` with a valid token, puts a driver online, creates a booking with an `Idempotency-Key`, repeats with the same key and checks the same booking comes back, and reads reviews through the gateway.
 
-**B. By hand**
+## Test Phase 8: frontend
 
-Everything now goes through http://localhost:8080 instead of the service ports:
-
-```powershell
-# login
-$login = Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/api/v1/auth/login' -ContentType 'application/json' -Body '{"email":"rider@example.com","password":"secret123"}'
-$token = $login.token
-
-# bookings without a token: 401
-Invoke-WebRequest -Uri 'http://localhost:8080/api/v1/bookings?passengerId=1' -UseBasicParsing
-
-# bookings with a token: 200
-Invoke-RestMethod -Uri 'http://localhost:8080/api/v1/bookings?passengerId=1' -Headers @{ Authorization = ('Bearer ' + $token) }
-
-# create a booking with an idempotency key
-Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/api/v1/bookings' `
-  -Headers @{ Authorization = ('Bearer ' + $token); 'Idempotency-Key' = 'my-key-1' } `
-  -ContentType 'application/json' `
-  -Body '{"passengerId":1,"pickupLatitude":12.9716,"pickupLongitude":77.5946}'
-```
-
-Sending the same `Idempotency-Key` again returns the same booking id instead of creating a second one.
-
-**C. Circuit breaker**
-
-Stop socket-service, then create a booking with a driver online. The booking is still created (201/PENDING) and the booking log shows the socket call failing; after about five failed calls the circuit opens and further calls fail fast without waiting. Start socket-service again and after about 10 seconds it recovers.
-
-**D. Rate limiting (optional, needs Redis)**
-
-Start the gateway with `$env:SPRING_PROFILES_ACTIVE='redis'`, then send more than 10 quick requests from the same IP; extra requests get 429.
-
-**E. Unit tests (all modules)**
+With the backend running (gateway on 8080):
 
 ```powershell
-.\scripts\mvn.ps1 test
+cd frontend
+npm install
+npm run dev
 ```
 
-Expected: `Tests run: 66` in total (16 auth, 14 location, 7 socket, 13 booking, 10 review, 6 gateway) and `BUILD SUCCESS`. If Maven prints a different number, trust Maven and tell me.
+Then in the browser: sign up, tap two map points, press Book ride, watch the status screen, and check My rides. If booking creation fails, check the browser console and the booking-service window; a 409 means no driver was online near the pickup.
 
 ## Using IntelliJ instead
 
@@ -219,6 +216,8 @@ Open the repo folder, right-click `backend/pom.xml` and choose Add as Maven Proj
 |---|---|
 | `running scripts is disabled on this system` | Run the `Set-ExecutionPolicy -Scope Process ...` line from Step 1 in that window |
 | `Unable to access jarfile ...jar` | The build did not finish. Run `git pull`, then `.\scripts\mvn.ps1 clean install -DskipTests` and look for the first `[ERROR]` line |
+| Frontend shows a network/CORS error | The gateway must be running on 8080; it allows only `http://localhost:5173` |
+| Booking fails with 409 in the frontend | No driver was online near the pickup point; put a driver online first |
 | Gateway returns 401 on a route you expected to work | Send `Authorization: Bearer <token>`; signup and login are the only auth routes that do not need one |
 | Gateway returns 503 with a JSON error | That service is down or its circuit breaker opened; start the service and wait ~10 seconds |
 | Gateway rate limiting returns 429 | Expected with the redis profile after more than 10 quick requests from one IP |
