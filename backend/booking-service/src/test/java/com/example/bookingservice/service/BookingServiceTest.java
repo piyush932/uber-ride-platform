@@ -122,6 +122,7 @@ class BookingServiceTest {
             }
             return b;
         });
+        when(repository.saveAndFlush(any(Booking.class))).thenAnswer(inv -> inv.getArgument(0));
         when(locationClient.findNearby(12.9716, 77.5946)).thenReturn(List.of());
 
         ResponseStatusException error = assertThrows(ResponseStatusException.class,
@@ -184,7 +185,7 @@ class BookingServiceTest {
         when(repository.findById(1L)).thenReturn(Optional.of(savedBooking(Booking.BookingStatus.PENDING)));
 
         ResponseStatusException error = assertThrows(ResponseStatusException.class,
-            () -> service.complete(1L));
+            () -> service.complete(1L, new AcceptBookingRequest(9002L)));
 
         assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
         verify(events, never()).publish(any());
