@@ -1,78 +1,75 @@
-server.port=8080
-spring.application.name=api-gateway
+server:
+  port: 8080
 
-# Same secret as auth-service. Override JWT_SECRET anywhere that is not local.
-jwt.secret=${JWT_SECRET:dev-only-secret-change-me-dev-only-secret-change-me}
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: auth
+              uri: lb://AUTH-SERVICE
+              predicates:
+                - Path=/api/v1/auth/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: authCB
+                    fallbackUri: forward:/fallback/auth
 
-# Eureka. Set EUREKA_ENABLED=false to run without the registry.
-eureka.client.enabled=${EUREKA_ENABLED:true}
-eureka.client.service-url.defaultZone=${EUREKA_URL:http://localhost:8761/eureka}
-eureka.instance.prefer-ip-address=true
+            - id: bookings
+              uri: lb://BOOKING-SERVICE
+              predicates:
+                - Path=/api/v1/bookings/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: bookingCB
+                    fallbackUri: forward:/fallback/booking
 
-management.endpoints.web.exposure.include=health,info
+            - id: locations
+              uri: lb://LOCATION-SERVICE
+              predicates:
+                - Path=/api/v1/locations/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: locationCB
+                    fallbackUri: forward:/fallback/location
 
-spring.cloud.gateway.server.webflux.routes:
-  - id: auth
-    uri: lb://AUTH-SERVICE
-    predicates:
-      - Path=/api/v1/auth/**
-    filters:
-      - name: CircuitBreaker
-        args:
-          name: authCB
-          fallbackUri: forward:/fallback/auth
-
-  - id: bookings
-    uri: lb://BOOKING-SERVICE
-    predicates:
-      - Path=/api/v1/bookings/**
-    filters:
-      - name: CircuitBreaker
-        args:
-          name: bookingCB
-          fallbackUri: forward:/fallback/booking
-
-  - id: locations
-    uri: lb://LOCATION-SERVICE
-    predicates:
-      - Path=/api/v1/locations/**
-    filters:
-      - name: CircuitBreaker
-        args:
-          name: locationCB
-          fallbackUri: forward:/fallback/location
-
-  - id: reviews
-    uri: lb://REVIEW-SERVICE
-    predicates:
-      - Path=/api/v1/reviews/**
-    filters:
-      - name: CircuitBreaker
-        args:
-          name: reviewCB
-          fallbackUri: forward:/fallback/review
-
-  - id: socket-test-page
-    uri: http://localhost:8083
-    predicates:
-      - Path=/test.html
+            - id: reviews
+              uri: lb://REVIEW-SERVICE
+              predicates:
+                - Path=/api/v1/reviews/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: reviewCB
+                    fallbackUri: forward:/fallback/review
 
 # socket-service REST is intentionally not routed: drivers talk to it over WebSocket,
 # and booking-service calls it internally.
 
-resilience4j.circuitbreaker.instances.authCB:
-  slidingWindowSize: 10
-  failureRateThreshold: 50
-  waitDurationInOpenState: 10s
-resilience4j.circuitbreaker.instances.bookingCB:
-  slidingWindowSize: 10
-  failureRateThreshold: 50
-  waitDurationInOpenState: 10s
-resilience4j.circuitbreaker.instances.locationCB:
-  slidingWindowSize: 10
-  failureRateThreshold: 50
-  waitDurationInOpenState: 10s
-resilience4j.circuitbreaker.instances.reviewCB:
-  slidingWindowSize: 10
-  failureRateThreshold: 50
-  waitDurationInOpenState: 10s
+# Same secret as auth-service. Override JWT_SECRET anywhere that is not local.
+jwt:
+  secret: ${JWT_SECRET:dev-only-secret-change-me-dev-only-secret-change-me}
+
+# Eureka. Set EUREKA_ENABLED=false to run without the registry.
+eureka:
+  client:
+    enabled: ${EUREKA_ENABLED:true}
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka}
+  instance:
+    prefer-ip-address: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  health:
+    redis:
+      enabled: false

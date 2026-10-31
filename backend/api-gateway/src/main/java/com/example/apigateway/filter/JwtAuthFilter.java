@@ -20,6 +20,7 @@ import java.util.List;
 /**
  * Verifies the JWT and forwards the caller's email downstream in X-User-Email.
  * Public paths are skipped; everything else needs a valid Bearer token.
+ * jjwt rejects expired and badly signed tokens while parsing.
  */
 @Component
 public class JwtAuthFilter implements GlobalFilter, Ordered {
@@ -54,25 +55,22 @@ public class JwtAuthFilter implements GlobalFilter, Ordered {
             Claims claims = Jwts.parser().verifyWith(key).build()
                 .parseSignedClaims(token).getPayload();
 
-            if (claims.getExpiration().before(new java.util.Date())) {
-                return unauthorized(exchange, "Token expired");
-            }
-
             ServerWebExchange downstream = exchange.mutate()
                 .request(exchange.getRequest().mutate()
-                    .header("X-User-Email", claims.getSubject())
+                    .headers(headers -> headers.set("X-User-Email", claims.getSubject()))
                     .build())
                 .build();
             return chain.filter(downstream);
         } catch (JwtException | IllegalArgumentException e) {
-            return unauthorized(exchange, "Invalid token");
+            return unauthorized(exchange, "Invalid or expired token");
         }
     }
 
     private Mono<Void> unauthorized(ServerWebExchange exchange, String message) {
         exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
         exchange.getResponse().getHeaders().add("Content-Type", "application/json");
-        byte[] body = ("{\"error\":\"" + message + "\"}").getBytes(StandardCharsets.UTF_8);
+        String json = "{\"error\":\"" + message + "\"}";
+        byte[] body = json.getBytes(StandardCharsets.UTF_8);
         return exchange.getResponse().writeWith(
             Mono.just(exchange.getResponse().bufferFactory().wrap(body)));
     }

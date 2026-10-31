@@ -116,7 +116,7 @@ Open one PowerShell window per service in the repo root. Each setting only lasts
 | Review on MySQL | `$env:SPRING_PROFILES_ACTIVE='mysql'` then `$env:DB_PASSWORD='your-mysql-password'` then `java -jar backend\review-service\target\review-service.jar` |
 | Gateway | `java -jar backend\api-gateway\target\api-gateway.jar` |
 
-Optional gateway rate limiting with your local Redis:
+Optional gateway rate limiting with your local Redis (Redis must be running, `redis-cli ping` answers `PONG`):
 
 ```powershell
 $env:SPRING_PROFILES_ACTIVE='redis'
@@ -195,7 +195,7 @@ Sending the same `Idempotency-Key` again returns the same booking id instead of 
 
 **C. Circuit breaker**
 
-Stop socket-service, then create a booking with a driver online. The booking is still created (201/PENDING) and the booking log shows the socket call failing; after several failures the circuit opens and further calls fail fast. Start socket-service again and it recovers.
+Stop socket-service, then create a booking with a driver online. The booking is still created (201/PENDING) and the booking log shows the socket call failing; after about five failed calls the circuit opens and further calls fail fast without waiting. Start socket-service again and after about 10 seconds it recovers.
 
 **D. Rate limiting (optional, needs Redis)**
 
@@ -207,7 +207,7 @@ Start the gateway with `$env:SPRING_PROFILES_ACTIVE='redis'`, then send more tha
 .\scripts\mvn.ps1 test
 ```
 
-Expected: `Tests run: 77` in total (16 auth, 14 location, 7 socket, 18 booking, 10 review, 6 gateway, plus 6 more booking tests already counted) and `BUILD SUCCESS`.
+Expected: `Tests run: 66` in total (16 auth, 14 location, 7 socket, 13 booking, 10 review, 6 gateway) and `BUILD SUCCESS`. If Maven prints a different number, trust Maven and tell me.
 
 ## Using IntelliJ instead
 
@@ -222,6 +222,7 @@ Open the repo folder, right-click `backend/pom.xml` and choose Add as Maven Proj
 | Gateway returns 401 on a route you expected to work | Send `Authorization: Bearer <token>`; signup and login are the only auth routes that do not need one |
 | Gateway returns 503 with a JSON error | That service is down or its circuit breaker opened; start the service and wait ~10 seconds |
 | Gateway rate limiting returns 429 | Expected with the redis profile after more than 10 quick requests from one IP |
+| Gateway fails to start with the redis profile | Redis is not running: `redis-cli ping` must answer `PONG` |
 | `Port 8080 was already in use` | An old gateway instance is still running |
 | Repeating `Connection refused ... 8761` | Eureka isn't running |
 | Booking returns 503 | location-service is not reachable on port 8082 |

@@ -4,10 +4,12 @@ import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
+import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 
 import javax.crypto.SecretKey;
@@ -15,8 +17,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.Date;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class JwtAuthFilterTest {
@@ -33,24 +38,28 @@ class JwtAuthFilterTest {
         when(chain.filter(any())).thenReturn(Mono.empty());
     }
 
-    private String token(String email) {
-        SecretKey key = Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8));
+    private SecretKey key() {
+        return Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String token(String email, long expiresInMs) {
         return Jwts.builder()
             .subject(email)
-            .issuedAt(new Date())
-            .expiration(new Date(System.currentTimeMillis() + 3600000))
-            .signWith(key)
+            .issuedAt(new Date(System.currentTimeMillis() - 10000))
+            .expiration(new Date(System.currentTimeMillis() + expiresInMs))
+            .signWith(key())
             .compact();
     }
 
     @Test
-    void publicSignupPathIsAllowedWithoutAToken() {
+    void publicSignupPathIsPassedOnWithoutAToken() {
         MockServerWebExchange exchange = MockServerWebExchange.from(
             MockServerHttpRequest.post("/api/v1/auth/signup").build());
 
         filter.filter(exchange, chain).block();
 
-        assertEquals(200, exchange.getResponse().getStatusCode().value());
+        verify(chain).filter(any());
+        assertNull(exchange.getResponse().getStatusCode());
     }
 
     @Test
@@ -61,19 +70,22 @@ class JwtAuthFilterTest {
         filter.filter(exchange, chain).block();
 
         assertEquals(HttpStatus.UNAUTHORIZED, exchange.getResponse().getStatusCode());
+        verify(chain, never()).filter(any());
     }
 
     @Test
     void validTokenIsForwardedWithTheUserEmail() {
         MockServerWebExchange exchange = MockServerWebExchange.from(
             MockServerHttpRequest.get("/api/v1/bookings")
-                .header("Authorization", "Bearer " + token("rider@example.com"))
+                .header("Authorization", "Bearer " + token("rider@example.com", 3600000))
                 .build());
 
         filter.filter(exchange, chain).block();
 
+        ArgumentCaptor<ServerWebExchange> forwarded = ArgumentCaptor.forClass(ServerWebExchange.class);
+        verify(chain).filter(forwarded.capture());
         assertEquals("rider@example.com",
-            exchange.getRequest().getHeaders().getFirst("X-User-Email"));
+            forwarded.getValue().getRequest().getHeaders().getFirst("X-User-Email"));
     }
 
     @Test
@@ -86,35 +98,30 @@ class JwtAuthFilterTest {
         filter.filter(exchange, chain).block();
 
         assertEquals(HttpStatus.UNAUTHORIZED, exchange.getResponse().getStatusCode());
+        verify(chain, never()).filter(any());
     }
 
     @Test
     void expiredTokenReturns401() {
-        SecretKey key = Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8));
-        String expired = Jwts.builder()
-            .subject("rider@example.com")
-            .issuedAt(new Date(System.currentTimeMillis() - 10000))
-            .expiration(new Date(System.currentTimeMillis() - 5000))
-            .signWith(key)
-            .compact();
-
         MockServerWebExchange exchange = MockServerWebExchange.from(
             MockServerHttpRequest.get("/api/v1/bookings")
-                .header("Authorization", "Bearer " + expired)
+                .header("Authorization", "Bearer " + token("rider@example.com", -5000))
                 .build());
 
         filter.filter(exchange, chain).block();
 
         assertEquals(HttpStatus.UNAUTHORIZED, exchange.getResponse().getStatusCode());
+        verify(chain, never()).filter(any());
     }
 
     @Test
-    void actuatorIsPublic() {
+    void actuatorIsPassedOnWithoutAToken() {
         MockServerWebExchange exchange = MockServerWebExchange.from(
             MockServerHttpRequest.get("/actuator/health").build());
 
         filter.filter(exchange, chain).block();
 
-        assertEquals(200, exchange.getResponse().getStatusCode().value());
+        verify(chain).filter(any());
+        assertNull(exchange.getResponse().getStatusCode());
     }
 }

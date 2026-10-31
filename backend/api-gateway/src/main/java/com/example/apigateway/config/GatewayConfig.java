@@ -1,31 +1,51 @@
 package com.example.apigateway.config;
 
-import com.example.apigateway.filter.JwtAuthFilter;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.timelimiter.TimeLimiterConfig;
+import org.springframework.cloud.circuitbreaker.resilience4j.ReactiveResilience4JCircuitBreakerFactory;
+import org.springframework.cloud.circuitbreaker.resilience4j.Resilience4JConfigBuilder;
+import org.springframework.cloud.client.circuitbreaker.Customizer;
+import org.springframework.cloud.gateway.filter.ratelimit.KeyResolver;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity;
-import org.springframework.security.config.web.server.SecurityWebFiltersOrder;
-import org.springframework.security.config.web.server.ServerHttpSecurity;
-import org.springframework.security.web.server.SecurityWebFilterChain;
+import reactor.core.publisher.Mono;
+
+import java.net.InetSocketAddress;
+import java.time.Duration;
 
 /**
- * The gateway checks the JWT for every route except the ones a new user needs
- * (signup, login) and health/fallback endpoints. It does not replace the
- * services' own rules; it stops unauthenticated traffic before it reaches them.
+ * The JWT check lives in JwtAuthFilter (a global filter), so no Spring Security is needed here.
  */
 @Configuration
-@EnableWebFluxSecurity
 public class GatewayConfig {
 
+    /**
+     * Rate limiting is per client IP. Without a key resolver of our own the gateway would use
+     * the Spring Security principal, which does not exist here, and refuse every request.
+     */
     @Bean
-    public SecurityWebFilterChain springSecurityFilterChain(ServerHttpSecurity http, JwtAuthFilter jwtAuthFilter) {
-        return http
-            .csrf(ServerHttpSecurity.CsrfSpec::disable)
-            .authorizeExchange(exchange -> exchange
-                .pathMatchers("/api/v1/auth/signup", "/api/v1/auth/login").permitAll()
-                .pathMatchers("/actuator/**", "/fallback/**").permitAll()
-                .anyExchange().authenticated())
-            .addFilterBefore(jwtAuthFilter, SecurityWebFiltersOrder.AUTHENTICATION)
-            .build();
+    public KeyResolver ipKeyResolver() {
+        return exchange -> {
+            InetSocketAddress remote = exchange.getRequest().getRemoteAddress();
+            String key = remote == null || remote.getAddress() == null
+                ? "unknown"
+                : remote.getAddress().getHostAddress();
+            return Mono.just(key);
+        };
+    }
+
+    /** Default circuit breaker settings for every route (the library default timeout is only 1 second). */
+    @Bean
+    public Customizer<ReactiveResilience4JCircuitBreakerFactory> defaultCustomizer() {
+        return factory -> factory.configureDefault(id -> new Resilience4JConfigBuilder(id)
+            .circuitBreakerConfig(CircuitBreakerConfig.custom()
+                .slidingWindowSize(10)
+                .failureRateThreshold(50)
+                .waitDurationInOpenState(Duration.ofSeconds(10))
+                .build())
+            .timeLimiterConfig(TimeLimiterConfig.custom()
+                .timeoutDuration(Duration.ofSeconds(10))
+                .build())
+            .build());
     }
 }
