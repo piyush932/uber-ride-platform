@@ -185,7 +185,7 @@ class BookingServiceTest {
         when(repository.findById(1L)).thenReturn(Optional.of(savedBooking(Booking.BookingStatus.PENDING)));
 
         ResponseStatusException error = assertThrows(ResponseStatusException.class,
-            () -> service.complete(1L, new AcceptBookingRequest(9002L)));
+            () -> service.complete(1L));
 
         assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
         verify(events, never()).publish(any());
