@@ -25,6 +25,11 @@ export const login = async (email, password) => {
 export const getBooking = id => api.get(`/api/v1/bookings/${id}`)
 export const myBookings = passengerId => api.get('/api/v1/bookings', { params: { passengerId } })
 export const createBooking = (body, key) => api.post('/api/v1/bookings', body, { headers: { 'Idempotency-Key': key } })
-export const cancelBooking = id => api.post(`/api/v1/bookings/${id}/cancel`, null, { params: { reason: 'CANCELLED_BY_PASSENGER' } })
+export const cancelBooking = id =>
+  api.post(
+    `/api/v1/bookings/${id}/cancel`,
+    { reason: 'CANCELLED_BY_PASSENGER' },
+    { headers: { 'Content-Type': 'application/json' } },
+  )
 export const completeBooking = id => api.post(`/api/v1/bookings/${id}/complete`)
 export default api
