@@ -1,10 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import MapView from './components/MapView.jsx'
+import usePlace from './usePlace.js'
 import api, { getToken, clearAuth, login, signup, getBooking, myBookings, createBooking, cancelBooking, completeBooking } from './api.js'
-const errorText = e => e.response?.data?.message || e.response?.data?.error || e.message || 'Request failed. Please try again.'
+const errorText = e => {
+  const data = e.response?.data
+  if (data?.message) return data.message
+  if (e.response?.status === 409) return 'This request could not be completed. Check that a driver is online near your pickup.'
+  return data?.error || e.message || 'Request failed. Please try again.'
+}
 const terminal = status => ['COMPLETED', 'CANCELLED'].includes(status)
 const coords = p => p ? p.map(n => Number(n).toFixed(5)).join(', ') : 'Select on the map'
+function Place({ point, empty = 'Select on the map' }) {
+  const { place, loading } = usePlace(point)
+  if (!point || point[0] == null || point[1] == null) return <>{empty}</>
+  if (loading) return <>Finding address…</>
+  return <span title={place?.full ? `${place.full} (${coords(point)})` : coords(point)}>{place?.label || coords(point)}</span>
+}
 function Auth({ onLogin }) {
   const location = useLocation(), navigate = useNavigate()
   const [mode, setMode] = useState('login'), [busy, setBusy] = useState(false), [error, setError] = useState('')
@@ -39,9 +51,13 @@ function Book({ user, checking }) {
       key.current ||= crypto.randomUUID()
       const { data } = await createBooking({ passengerId: user.id, pickupLatitude: pickup[0], pickupLongitude: pickup[1], dropLatitude: dropoff[0], dropLongitude: dropoff[1] }, key.current)
       navigate(`/rides/${data.id}`)
-    } catch (e) { setError(errorText(e)) } finally { setBusy(false); inFlight.current = false }
+    } catch (e) {
+      // A real answer from the server is final, so the next attempt gets a new key. The key is only reused after a network failure or timeout.
+      if (e.response) key.current = null
+      setError(errorText(e))
+    } finally { setBusy(false); inFlight.current = false }
   }
-  return <div className="booking-layout"><aside className="booking-panel"><p className="eyebrow">LET’S GET YOU THERE</p><h1>Where to next?</h1><p className="muted">Your next ride is a couple of points away.</p><div className="selection"><button className={`point ${selecting === 'pickup' ? 'selected' : ''}`} disabled={busy} onClick={() => setSelecting('pickup')}><span className="point-icon">●</span><span><strong>Pickup location</strong><small>{coords(pickup)}</small></span></button><button className={`point ${selecting === 'dropoff' ? 'selected' : ''}`} disabled={busy} onClick={() => setSelecting('dropoff')}><span className="point-icon">■</span><span><strong>Destination</strong><small>{coords(dropoff)}</small></span></button></div><p className="hint">Click the map to set your {selecting === 'pickup' ? 'pickup' : 'destination'}. Select a field above to edit it.</p>{error && <p className="error" role="alert">{error}</p>}<button disabled={busy || checking || (!!user && (!pickup || !dropoff))} onClick={book}>{checking ? 'Checking session…' : busy ? 'Requesting ride…' : user ? 'Request a ride →' : 'Log in to book →'}</button>{!user && <p className="hint">New passenger? <Link to="/login">Create an account</Link></p>}<div className="info-box"><strong>Built for a simple journey</strong><p>Choose your locations, request a ride and follow its status.</p><small>The dotted line connects your selections. It is not a driving route. A nearby online driver is required.</small></div></aside><MapView pickup={pickup} dropoff={dropoff} onClick={choose} /></div>
+  return <div className="booking-layout"><aside className="booking-panel"><p className="eyebrow">LET’S GET YOU THERE</p><h1>Where to next?</h1><p className="muted">Your next ride is a couple of points away.</p><div className="selection"><button className={`point ${selecting === 'pickup' ? 'selected' : ''}`} disabled={busy} onClick={() => setSelecting('pickup')}><span className="point-icon">●</span><span><strong>Pickup location</strong><small><Place point={pickup} /></small></span></button><button className={`point ${selecting === 'dropoff' ? 'selected' : ''}`} disabled={busy} onClick={() => setSelecting('dropoff')}><span className="point-icon">■</span><span><strong>Destination</strong><small><Place point={dropoff} /></small></span></button></div><p className="hint">Click the map to set your {selecting === 'pickup' ? 'pickup' : 'destination'}. Select a field above to edit it.</p>{error && <p className="error" role="alert">{error}</p>}<button disabled={busy || checking || (!!user && (!pickup || !dropoff))} onClick={book}>{checking ? 'Checking session…' : busy ? 'Requesting ride…' : user ? 'Request a ride →' : 'Log in to book →'}</button>{!user && <p className="hint">New passenger? <Link to="/login">Create an account</Link></p>}<div className="info-box"><strong>Built for a simple journey</strong><p>Choose your locations, request a ride and follow its status.</p><small>The dotted line connects your selections. It is not a driving route. A nearby online driver is required. Place names © OpenStreetMap contributors.</small></div></aside><MapView pickup={pickup} dropoff={dropoff} onClick={choose} /></div>
 }
 function Ride() {
   const { id } = useParams()
@@ -65,7 +81,7 @@ function Ride() {
     setBusy(true); setError(''); generation.current++
     try { await action(id); const { data } = await getBooking(id); setRide(data) } catch (e) { setError(errorText(e)) } finally { setBusy(false) }
   }
-  return <section className="content-card card"><Link to="/bookings">← My rides</Link><p className="eyebrow">YOUR JOURNEY</p><h1>Ride #{id}</h1>{error && <p className="error" role="alert">{error}</p>}{!ride ? <p role="status">Loading ride…</p> : <><span className={`chip ${ride.status}`}>{ride.status}</span><ol className="timeline">{['PENDING', 'CONFIRMED', 'COMPLETED'].map(s => <li key={s} className={s === ride.status ? 'active' : ''}>{s}</li>)}</ol>{ride.driverId && <p>Driver #{ride.driverId}</p>}{ride.cancelReason && <p>{ride.cancelReason}</p>}<p className="muted">Pickup: {coords([ride.pickupLatitude, ride.pickupLongitude])}</p><p className="muted">Destination: {coords([ride.dropLatitude, ride.dropLongitude])}</p><div className="actions">{!terminal(ride.status) && <button className="secondary" disabled={busy} onClick={() => act(cancelBooking)}>Cancel ride</button>}{ride.status === 'CONFIRMED' && <button disabled={busy} onClick={() => act(completeBooking)}>Complete ride</button>}</div><p className="hint">{terminal(ride.status) ? 'This journey has ended.' : 'Status updates automatically. Driver acceptance is handled outside this passenger app.'}</p></>}</section>
+  return <section className="content-card card"><Link to="/bookings">← My rides</Link><p className="eyebrow">YOUR JOURNEY</p><h1>Ride #{id}</h1>{error && <p className="error" role="alert">{error}</p>}{!ride ? <p role="status">Loading ride…</p> : <><span className={`chip ${ride.status}`}>{ride.status}</span><ol className="timeline">{['PENDING', 'CONFIRMED', 'COMPLETED'].map(s => <li key={s} className={s === ride.status ? 'active' : ''}>{s}</li>)}</ol>{ride.driverId && <p>Driver #{ride.driverId}</p>}{ride.cancelReason && <p>{ride.cancelReason}</p>}<p className="muted">Pickup: <Place point={[ride.pickupLatitude, ride.pickupLongitude]} empty="Not available" /></p><p className="muted">Destination: <Place point={[ride.dropLatitude, ride.dropLongitude]} empty="Not available" /></p><div className="actions">{!terminal(ride.status) && <button className="secondary" disabled={busy} onClick={() => act(cancelBooking)}>Cancel ride</button>}{ride.status === 'CONFIRMED' && <button disabled={busy} onClick={() => act(completeBooking)}>Complete ride</button>}</div><p className="hint">{terminal(ride.status) ? 'This journey has ended.' : 'Status updates automatically. Driver acceptance is handled outside this passenger app.'}</p></>}</section>
 }
 function History({ user }) {
   const [rides, setRides] = useState(null), [error, setError] = useState('')
