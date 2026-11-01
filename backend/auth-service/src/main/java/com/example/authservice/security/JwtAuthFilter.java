@@ -1,62 +1,55 @@
 package com.example.authservice.security;
 
-import com.example.authservice.service.JwtService;
+import com.example.authservice.repository.DriverRepository;
+import com.example.authservice.service.DriverTokenService;
+import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.io.IOException;
+import java.util.List;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
-import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
-import java.io.IOException;
-
 @Component
 public class JwtAuthFilter extends OncePerRequestFilter {
-
-    private static final Logger log = LoggerFactory.getLogger(JwtAuthFilter.class);
-    private static final String BEARER = "Bearer ";
-
-    private final JwtService jwtService;
-    private final UserDetailsService userDetailsService;
-
-    public JwtAuthFilter(JwtService jwtService, UserDetailsService userDetailsService) {
-        this.jwtService = jwtService;
-        this.userDetailsService = userDetailsService;
+    private final DriverTokenService tokens;
+    private final DriverRepository drivers;
+    private final UserDetailsService passengers;
+    public JwtAuthFilter(DriverTokenService tokens, DriverRepository drivers, UserDetailsService passengers) {
+        this.tokens = tokens; this.drivers = drivers; this.passengers = passengers;
     }
-
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
-
         String header = request.getHeader("Authorization");
-
-        if (header != null && header.startsWith(BEARER)
-                && SecurityContextHolder.getContext().getAuthentication() == null) {
-            String token = header.substring(BEARER.length());
+        if (header != null && header.startsWith("Bearer ") && SecurityContextHolder.getContext().getAuthentication() == null) {
             try {
-                String email = jwtService.extractUsername(token);
-                UserDetails user = userDetailsService.loadUserByUsername(email);
-                if (jwtService.isValid(token, user.getUsername())) {
-                    UsernamePasswordAuthenticationToken auth =
-                        new UsernamePasswordAuthenticationToken(user, null, user.getAuthorities());
-                    auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-                    SecurityContextHolder.getContext().setAuthentication(auth);
+                Claims claims = tokens.read(header.substring(7));
+                String email = claims.getSubject();
+                if (email == null || email.isBlank() || claims.getExpiration() == null) throw new IllegalArgumentException("Missing identity or expiry");
+                String role = claims.get("role", String.class);
+                if ("DRIVER".equals(role)) {
+                    var driver = drivers.findByEmail(email).orElseThrow(() -> new UsernameNotFoundException("Unknown driver"));
+                    Object id = claims.get("userId");
+                    if (!(id instanceof Number) || driver.getId().longValue() != ((Number) id).longValue()) throw new IllegalArgumentException("Driver identity mismatch");
+                    SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(email, null, List.of(new SimpleGrantedAuthority("ROLE_DRIVER"))));
+                } else if (role == null || "PASSENGER".equals(role)) {
+                    UserDetails passenger = passengers.loadUserByUsername(email);
+                    SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(passenger, null, List.of(new SimpleGrantedAuthority("ROLE_PASSENGER"))));
                 }
             } catch (JwtException | IllegalArgumentException | UsernameNotFoundException e) {
-                // leave the request unauthenticated, the entry point will return 401
-                log.debug("Rejected bearer token: {}", e.getMessage());
+                SecurityContextHolder.clearContext();
             }
         }
-
         chain.doFilter(request, response);
     }
 }

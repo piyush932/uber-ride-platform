@@ -16,21 +16,17 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
-
     @Bean
-    public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder();
-    }
-
+    public PasswordEncoder passwordEncoder() { return new BCryptPasswordEncoder(); }
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http, JwtAuthFilter jwtAuthFilter) throws Exception {
-        http
-            .csrf(csrf -> csrf.disable())
+        http.csrf(csrf -> csrf.disable())
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/v1/auth/signup", "/api/v1/auth/login", "/actuator/health").permitAll()
+                .requestMatchers("/api/v1/auth/signup", "/api/v1/auth/login", "/api/v1/auth/signup/driver", "/api/v1/auth/login/driver", "/actuator/health").permitAll()
+                .requestMatchers("/api/v1/auth/driver/**").hasRole("DRIVER")
+                .requestMatchers("/api/v1/auth/me").hasRole("PASSENGER")
                 .anyRequest().authenticated())
-            // answer 401 (not the default 403) when there is no valid token
             .exceptionHandling(e -> e.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();
