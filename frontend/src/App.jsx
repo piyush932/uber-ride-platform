@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import MapView from './components/MapView.jsx'
 import usePlace from './usePlace.js'
+import DriverApp from './driver/DriverApp.jsx'
 import api, { getToken, clearAuth, login, signup, getBooking, myBookings, createBooking, cancelBooking, completeBooking } from './api.js'
 const errorText = e => {
   const data = e.response?.data
@@ -52,7 +53,6 @@ function Book({ user, checking }) {
       const { data } = await createBooking({ passengerId: user.id, pickupLatitude: pickup[0], pickupLongitude: pickup[1], dropLatitude: dropoff[0], dropLongitude: dropoff[1] }, key.current)
       navigate(`/rides/${data.id}`)
     } catch (e) {
-      // A real answer from the server is final, so the next attempt gets a new key. The key is only reused after a network failure or timeout.
       if (e.response) key.current = null
       setError(errorText(e))
     } finally { setBusy(false); inFlight.current = false }
@@ -100,5 +100,5 @@ export default function App() {
     return () => { alive = false; window.removeEventListener('session-expired', expired) }
   }, [])
   function protect(screen) { return checking ? <p className="content-card" role="status">Checking session…</p> : user ? screen : <Navigate to="/login" replace /> }
-  return <div className="app"><header className="topbar"><Link className="brand" to="/book">ride<span>.</span></Link><nav aria-label="Main navigation"><Link to="/book">Book a ride</Link><Link to="/bookings">My rides</Link></nav><div className="account">{user ? <><span className="username">{user.name || user.email}</span><button className="secondary" onClick={() => { clearAuth(); setUser(null); navigate('/book') }}>Log out</button></> : <Link className="login-link" to="/login">Log in / Sign up</Link>}</div></header>{notice && <div className="notice" role="status">{notice}</div>}<main><Routes><Route path="/" element={<Navigate to="/book" replace />} /><Route path="/book" element={<Book user={user} checking={checking} />} /><Route path="/login" element={<Auth onLogin={u => { setUser(u); setNotice('') }} />} /><Route path="/bookings" element={protect(<History user={user} />)} /><Route path="/rides/:id" element={protect(<Ride />)} /><Route path="*" element={<Navigate to="/book" replace />} /></Routes></main><footer>Ride Platform · Passenger preview · Local development</footer></div>
+  return <div className="app"><header className="topbar"><Link className="brand" to="/book">ride<span>.</span></Link><nav aria-label="Main navigation"><Link to="/book">Book a ride</Link><Link to="/bookings">My rides</Link></nav><div className="account">{user ? <><span className="username">{user.name || user.email}</span><button className="secondary" onClick={() => { clearAuth(); setUser(null); navigate('/book') }}>Log out</button></> : <Link className="login-link" to="/login">Log in / Sign up</Link>}</div></header>{notice && <div className="notice" role="status">{notice}</div>}<main><Routes><Route path="/" element={<Navigate to="/book" replace />} /><Route path="/book" element={<Book user={user} checking={checking} />} /><Route path="/login" element={<Auth onLogin={u => { setUser(u); setNotice('') }} />} /><Route path="/bookings" element={protect(<History user={user} />)} /><Route path="/rides/:id" element={protect(<Ride />)} /><Route path="/driver/*" element={<DriverApp />} /><Route path="*" element={<Navigate to="/book" replace />} /></Routes></main><footer>Ride Platform · Passenger preview · Local development</footer></div>
 }
