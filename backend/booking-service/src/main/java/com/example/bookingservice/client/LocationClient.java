@@ -19,6 +19,8 @@ public class LocationClient {
     public record NearbyDriver(String driverId, double distanceKm, double latitude, double longitude) {
     }
 
+    private static final int CANDIDATE_LIMIT = 20;
+
     private final RestClient restClient;
     private final double radiusKm;
 
@@ -31,12 +33,21 @@ public class LocationClient {
         this.radiusKm = radiusKm;
     }
 
-    /** Nearest driver first. */
+    /** Nearest driver first, at most one. */
     public List<NearbyDriver> findNearby(double latitude, double longitude) {
+        return query(latitude, longitude, 1);
+    }
+
+    /** Nearest drivers first. The matcher walks this list to skip drivers that are busy or already tried. */
+    public List<NearbyDriver> findCandidates(double latitude, double longitude) {
+        return query(latitude, longitude, CANDIDATE_LIMIT);
+    }
+
+    private List<NearbyDriver> query(double latitude, double longitude, int limit) {
         try {
             return restClient.get()
-                .uri("/api/v1/locations/nearby?lat={lat}&lng={lng}&radiusKm={radius}&limit=1",
-                    latitude, longitude, radiusKm)
+                .uri("/api/v1/locations/nearby?lat={lat}&lng={lng}&radiusKm={radius}&limit={limit}",
+                    latitude, longitude, radiusKm, limit)
                 .retrieve()
                 .body(new ParameterizedTypeReference<List<NearbyDriver>>() {
                 });

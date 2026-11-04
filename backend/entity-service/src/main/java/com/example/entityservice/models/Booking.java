@@ -24,7 +24,7 @@ import lombok.Setter;
 public class Booking extends BaseModel {
 
     public enum BookingStatus {
-        PENDING, CONFIRMED, COMPLETED, CANCELLED
+        PENDING, CONFIRMED, IN_PROGRESS, COMPLETED, CANCELLED
     }
 
     @Enumerated(EnumType.STRING)
