@@ -1,5 +1,6 @@
 # Active with SPRING_PROFILES_ACTIVE=redis (needs your local Redis running).
 # Limits each client IP to a burst of 10 requests, refilling 1 per second, per route.
+# The driver route is allowed more (5 per second, burst 20) because the dashboard polls every 3 seconds.
 spring:
   data:
     redis:
@@ -34,6 +35,21 @@ spring:
                   args:
                     redis-rate-limiter.replenishRate: 1
                     redis-rate-limiter.burstCapacity: 10
+                    redis-rate-limiter.requestedTokens: 1
+                - name: CircuitBreaker
+                  args:
+                    name: bookingCB
+                    fallbackUri: forward:/fallback/booking
+
+            - id: driver
+              uri: lb://BOOKING-SERVICE
+              predicates:
+                - Path=/api/v1/driver/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 5
+                    redis-rate-limiter.burstCapacity: 20
                     redis-rate-limiter.requestedTokens: 1
                 - name: CircuitBreaker
                   args:

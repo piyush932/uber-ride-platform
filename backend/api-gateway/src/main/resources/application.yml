@@ -35,6 +35,16 @@ spring:
                     name: bookingCB
                     fallbackUri: forward:/fallback/booking
 
+            - id: driver
+              uri: lb://BOOKING-SERVICE
+              predicates:
+                - Path=/api/v1/driver/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: bookingCB
+                    fallbackUri: forward:/fallback/booking
+
             - id: locations
               uri: lb://LOCATION-SERVICE
               predicates:
