@@ -1,237 +1,248 @@
 # Uber Ride Platform
 
-A ride-hailing backend I'm building phase by phase to practise real microservice problems: service discovery, stateless auth, geospatial search, real-time push, event-driven flows, cross-service rules and edge resilience. Every phase is small enough to run and test on its own.
+A local-first ride-hailing project for practising microservices: authentication, discovery, nearby-driver lookup, booking orchestration, timed offers, trip lifecycle and reviews.
 
-Stack: Java (builds to Java 17 bytecode, runs on 17 to 25), Spring Boot 3.5.16, Spring Cloud 2025.0.3, Maven. Frontend: React 18 + Vite + Leaflet.
+Stack: Java 17 target (JDK 25 used locally), Spring Boot 3.5.16, Spring Cloud 2025.0.3, Maven multi-module, React 18, Vite, Leaflet and axios.
 
-The plan is: **run and test everything locally first** (no Docker needed), then switch to Docker at the end. Every service runs with in-memory defaults, and also supports real MySQL / Redis / Kafka through Spring profiles.
+## Project status
 
-## Where the project is right now
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Maven modules and helper scripts | Implemented |
+| 2 | Eureka, entity library, passenger auth/JWT | Implemented |
+| 3 | Driver positions, TTL and nearby search | Implemented |
+| 4 | Socket-service STOMP notifications | Implemented |
+| 5 | Booking orchestration and events | Implemented, extended in Phase 9 |
+| 6 | Reviews for completed bookings | Implemented |
+| 7 | Gateway JWT rules, circuit breakers, optional Redis rate limit | Implemented |
+| 8 | Passenger UI, map booking, status polling and history | Implemented |
+| 9 | Driver accounts/portal, heartbeat, offers, reject/expiry/reassignment, start/complete | Implemented; see verification status below |
+| Next | Security/concurrency hardening, live UI push and complete Docker deployment | Pending |
 
-| Phase | What | Status |
-|-------|------|--------|
-| 1 | Project skeleton, Maven multi-module build, helper scripts | Done |
-| 2 | Eureka registry, shared entity library, Auth service (signup, login, JWT) | Done |
-| 3 | Location service (driver positions, nearby search) | Done |
-| 4 | Socket service (WebSocket/STOMP push to drivers) | Done |
-| 5 | Booking service (orchestrates location + socket, race-safe accept, events) | Done |
-| 6 | Review service (ratings for completed bookings) | Done |
-| 7 | API gateway (JWT check, circuit breakers, optional rate limiting), booking idempotency | Done |
-| 8 | React passenger frontend (login, Leaflet map booking, live status, my rides) | Done (needs your local run to confirm) |
-| Final | Docker Compose with MySQL, Redis, Kafka; driver panel and WebSocket push to the UI | Planned |
+The backend build has been confirmed locally. The smoke-test output demonstrated the main sequential driver flows, but four single-offer assertions failed in the expiry-inclusive run. The array-return fix is in commit f53014e; a zero-failure rerun has not yet been explicitly reported. Build success does not establish browser behavior, infrastructure compatibility or concurrent dispatch safety.
 
-[docs/HLD.md](docs/HLD.md) describes the full target design and marks what is built.
+See [the HLD](docs/HLD.md) for architecture, diagrams and consistency limitations. This is a development project, not a production-ready public deployment.
 
-## What the code solves so far
+## Services and repository
 
-- **Who is calling?** Passengers sign up and log in, and receive a signed JWT.
-- **Where do services live?** Services register with Eureka; the gateway routes to them with `lb://` instead of hard-coded hosts.
-- **Who is allowed in?** The gateway checks the JWT on every route except signup, login, health and fallbacks, and forwards the user's email downstream in `X-User-Email`.
-- **Where are the drivers?** Drivers report positions; the location service answers "who is within 5 km, nearest first". Drivers who stop reporting drop out automatically.
-- **How does a driver hear about a ride instantly?** The socket service pushes ride requests over WebSocket; booking-service calls it through a circuit breaker.
-- **How does a ride get booked?** The booking service saves the booking, asks location for the nearest driver, asks socket to notify them, and confirms the booking when the driver accepts. A second accept is refused (optimistic locking).
-- **What if the passenger retries?** With an `Idempotency-Key` header, the same key returns the same booking instead of creating a second one.
-- **How does a ride end?** A confirmed booking can be completed, which is the trigger for a review.
-- **How is a driver rated?** The review service accepts one review per completed booking, from the passenger who made it, and computes a driver's average rating.
-- **What does the passenger see?** A responsive web app: log in, pick pickup and dropoff on a map, book, watch the ride status, and see past rides.
+| Component | Port |
+|---|---|
+| api-gateway | 8080 |
+| auth-service | 8081 |
+| location-service | 8082 |
+| socket-service | 8083 |
+| booking-service | 8084 |
+| review-service | 8085 |
+| eureka-server | 8761 |
+| Vite frontend | 5173 |
 
-## Repo layout
+- backend/: Maven parent and service modules; entity-service is a shared library.
+- frontend/: separate passenger and driver layouts and sessions.
+- scripts/: Maven/start helpers and smoke tests.
+- docs/HLD.md: implemented architecture and roadmap.
+- postman/: earlier-phase request collections.
+- docker-compose.yml: partial deployment, not the complete platform.
 
-```
-uber-ride-platform/
-  scripts/
-    mvn.ps1                   runs Maven (downloads it into .tools/ if you don't have it)
-    start-all.ps1             opens one window per service (in-memory defaults)
-    smoke-test-auth.ps1       automated checks for auth
-    smoke-test-location.ps1   14 automated checks for location
-    smoke-test-socket.ps1     automated checks for the socket REST side
-    smoke-test-booking.ps1    13 automated checks for booking
-    smoke-test-review.ps1     13 automated checks for review
-    smoke-test-gateway.ps1    automated checks for the gateway
-  frontend/                   React passenger app (Vite + Leaflet)
-  backend/                    Maven multi-module build (parent pom.xml)
-    entity-service/           shared JPA entities (library)
-    eureka-server/            service registry          :8761
-    auth-service/             signup / login / JWT      :8081
-    location-service/         driver positions          :8082
-    socket-service/           WebSocket push            :8083
-    booking-service/          bookings                  :8084
-    review-service/           ratings                   :8085
-    api-gateway/              single entry point        :8080
-  docker-compose.yml          final step, only covers MySQL, Eureka and auth for now
-  docs/HLD.md                 architecture and design decisions
-  postman/                    importable test collections (Phase 1-2, 3-4, 5 and 6)
-```
+## Prerequisites
 
-## What you need on your laptop
+Use the project's Java 17 target with your configured JDK, Node/npm for frontend, and PowerShell on Windows. Set JAVA_HOME and check java -version and node -v. The Maven helper downloads Maven if required. MySQL and Redis are optional for the in-memory defaults; use your local stores for persistent-profile testing. Map tiles and address lookup need internet access. Kafka is not required for the default flow.
 
-- A JDK, version 17 or newer (JDK 25 works). `java -version` must print a version, and `JAVA_HOME` should point at the JDK folder.
-- Node.js 18 or newer for the frontend (`node -v` must print a version).
-- Nothing else for the in-memory mode. Maven is downloaded for you by `scripts/mvn.ps1`.
-- Optional: MySQL 8 (auth, booking, review) and Redis (location; also gateway rate limiting). Kafka is not needed until the Docker stage.
-- A browser with internet access for the map tiles and the socket test page.
-- Optional: Postman, IntelliJ IDEA, VS Code.
+## Build the backend
 
-## Build and start the backend (Windows PowerShell)
-
-Open PowerShell in the repo root (the folder that contains `backend`, `frontend` and `scripts`).
-
-**Step 1: allow the helper scripts for this window only**
+Run from the repository root. Stop running backend JARs first: Windows cannot replace a JAR held by a running application.
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+git pull origin main
+.\scripts\mvn.ps1 clean install
+Get-ChildItem backend\*\target\*.jar
 ```
 
-**Step 2: build everything**
+Require BUILD SUCCESS and zero test failures. Do not use -DskipTests for verification. Seven runnable services plus the entity library are built.
 
-```powershell
-git pull
-.\scripts\mvn.ps1 clean install -DskipTests
+For IntelliJ, import backend/pom.xml, configure the JDK and Lombok annotation processing, and run each service Application class. Stop old IDE instances before starting rebuilt JARs.
+
+## MySQL upgrade for Phase 9
+
+Back up valuable local data and stop booking-service before changing its schema. Inspect first:
+
+```sql
+USE uber_booking;
+SHOW CREATE TABLE booking;
 ```
 
-The output must end with `BUILD SUCCESS`. Then check that every service has its jar:
+Only if status is a native enum missing IN_PROGRESS, widen it:
 
-```powershell
-dir backend\*\target\*.jar
+```sql
+ALTER TABLE booking MODIFY COLUMN status
+ENUM('PENDING','CONFIRMED','IN_PROGRESS','COMPLETED','CANCELLED') NOT NULL;
 ```
 
-You should see seven runnable jars (eureka-server, auth-service, location-service, socket-service, booking-service, review-service, api-gateway) plus entity-service. If a jar is missing, the build failed: scroll up to the first `[ERROR]` line.
+Do not overwrite a different column definition without adapting the migration. A fresh/H2 database needs no manual enum change. The ride_offer table is included in booking-service entity scanning and created by ddl-auto=update. Controlled Flyway migrations are still planned.
 
-**Step 3a: start with in-memory defaults**
+## Start the backend
+
+### In-memory defaults
 
 ```powershell
 .\scripts\start-all.ps1
 ```
 
-This opens seven windows. Wait about 30 seconds. Open http://localhost:8761 and you should see `AUTH-SERVICE`, `LOCATION-SERVICE`, `SOCKET-SERVICE`, `BOOKING-SERVICE`, `REVIEW-SERVICE` and `API-GATEWAY` listed. The gateway is http://localhost:8080.
+Wait for startup and check http://localhost:8761 for registered services.
 
-**Step 3b: start with your local MySQL and Redis**
+### Local MySQL and Redis
 
-Open one PowerShell window per service in the repo root. Each setting only lasts for that window.
-
-| Window | Commands |
-|---|---|
-| Eureka | `java -jar backend\eureka-server\target\eureka-server.jar` |
-| Auth on MySQL | `$env:SPRING_PROFILES_ACTIVE='mysql'` then `$env:DB_PASSWORD='your-mysql-password'` then `java -jar backend\auth-service\target\auth-service.jar` |
-| Location on Redis | `$env:SPRING_PROFILES_ACTIVE='redis'` then `java -jar backend\location-service\target\location-service.jar` |
-| Socket | `java -jar backend\socket-service\target\socket-service.jar` |
-| Booking on MySQL | `$env:SPRING_PROFILES_ACTIVE='mysql'` then `$env:DB_PASSWORD='your-mysql-password'` then `java -jar backend\booking-service\target\booking-service.jar` |
-| Review on MySQL | `$env:SPRING_PROFILES_ACTIVE='mysql'` then `$env:DB_PASSWORD='your-mysql-password'` then `java -jar backend\review-service\target\review-service.jar` |
-| Gateway | `java -jar backend\api-gateway\target\api-gateway.jar` |
-
-Optional gateway rate limiting with your local Redis (Redis must be running, `redis-cli ping` answers `PONG`):
+Open a separate PowerShell window in the repo root for each service. Set environment variables only in the intended window. Start Eureka first:
 
 ```powershell
-$env:SPRING_PROFILES_ACTIVE='redis'
+java -jar backend\eureka-server\target\eureka-server.jar
+```
+
+For auth, booking and review, set mysql and DB_PASSWORD before launching the corresponding JAR (repeat in separate windows):
+
+```powershell
+$env:SPRING_PROFILES_ACTIVE = 'mysql'
+$env:DB_PASSWORD = 'your-local-mysql-password'
+# Auth window:
+java -jar backend\auth-service\target\auth-service.jar
+# Booking window, after setting the same variables there:
+# java -jar backend\booking-service\target\booking-service.jar
+# Review window, after setting the same variables there:
+# java -jar backend\review-service\target\review-service.jar
+```
+
+Databases are uber_auth, uber_booking and uber_review. Other local settings include DB_USER and DB_PORT.
+
+Location window, with local Redis running:
+
+```powershell
+$env:SPRING_PROFILES_ACTIVE = 'redis'
+java -jar backend\location-service\target\location-service.jar
+```
+
+Socket window:
+
+```powershell
+java -jar backend\socket-service\target\socket-service.jar
+```
+
+Gateway window, without its rate-limit profile for smoke testing:
+
+```powershell
+Remove-Item Env:SPRING_PROFILES_ACTIVE -ErrorAction SilentlyContinue
 java -jar backend\api-gateway\target\api-gateway.jar
 ```
 
-The MySQL profile creates the databases `uber_auth`, `uber_booking` and `uber_review` itself. Other settings: `DB_USER`, `DB_PORT`, `REDIS_HOST`, `REDIS_PORT`, `SPRING_DATA_REDIS_PASSWORD`, `JWT_SECRET`.
+Location may still use Redis while gateway rate limiting is disabled. To test gateway rate limiting separately, restart only the gateway with SPRING_PROFILES_ACTIVE=redis. Keep JWT_SECRET consistent across auth and gateway; do not use the development default outside an isolated local environment.
 
-Eureka is optional: set `$env:EUREKA_ENABLED='false'` in a window before starting a service there and it runs on its own.
+Setting EUREKA_ENABLED=false disables registration/discovery participation for individual services, but the gateway's lb:// routes still require service-instance resolution. It is not a complete gateway standalone configuration.
 
-## Run the frontend (Phase 8)
-
-In a new PowerShell window, from the repo root:
+## Start and build the frontend
 
 ```powershell
 cd frontend
 npm install
+npm run build
 npm run dev
 ```
 
-Open http://localhost:5173. The frontend calls the gateway at http://localhost:8080 (change it with `VITE_API_URL` in a `.env` file if needed).
+- Passenger: http://localhost:5173/
+- Driver: http://localhost:5173/driver/login
 
-**Test the passenger flow**
+Vite proxies /api to http://localhost:8080 without rewriting the path. VITE_API_URL changes the axios API base when supplied; it does not change the proxy target in vite.config.js. Prefer the default same-origin proxy locally.
 
-1. Sign up with an email and password (or log in if you already have an account).
-2. You land on the booking screen with a map.
-3. Tap the map once for pickup (green), once more for dropoff (red).
-4. Press **Book ride**. You are taken to the ride status screen.
-5. The status screen refreshes every 3 seconds. With a driver online near the pickup, the booking should reach `CONFIRMED` after the driver accepts in the socket test page.
-6. Use **Cancel ride** (pending/confirmed) or **Complete ride** (confirmed) to change the state.
-7. Open **My rides** to see all your bookings and reopen any of them.
+Use separate browser profiles or a normal and incognito window for watching passenger and driver together. Driver storage uses driver_token/driver_user; passenger storage uses token/user. Two different drivers need isolated browser storage.
 
-Known limitation: the passenger UI polls the booking every 3 seconds; live WebSocket push to the passenger screen is planned with the driver panel.
+## Manual Phase 9 test checklist
 
-## Test Phase 2: auth
+1. Driver: sign up or log in, click the map or use the dashboard's geolocation button, then toggle Offline to Online. Verify PUT /api/v1/locations/drivers/{id} returns 204 and repeats approximately every 5 seconds.
+2. Passenger: log in, choose pickup within 5 km of the driver and a destination, then request a ride. It starts PENDING.
+3. Driver: a New ride request card should appear after dashboard polling (approximately 3 seconds plus request time). Accept before the server deadline.
+4. Passenger: confirm the status becomes CONFIRMED and shows the assigned driver.
+5. Driver: Start trip. Passenger sees IN_PROGRESS and no Cancel button. Complete trip; both sides see COMPLETED/history.
+6. Reject/reassign: put a second driver online nearby using an isolated browser session. Book again; the nearest driver rejects and the other driver receives the next offer.
+7. No drivers left: reject from every eligible driver; expect CANCELLED / NO_DRIVER_AVAILABLE.
+8. Expiry: with only one eligible driver online, request another ride and do nothing. The 20-second offer expires; cancellation follows the sweep, normally within a few more seconds.
+9. Cancellation: cancel a PENDING ride as passenger; the offer disappears and cannot be accepted. CONFIRMED is also cancellable, IN_PROGRESS is not.
+10. Offline: toggle offline and verify DELETE /api/v1/locations/drivers/{id} returns 204. Check histories on both sides.
+
+Both UIs poll status rather than subscribe to WebSocket push. The map line joins selected points; it is not a driving route. Address labels are browser lookups and are not stored with bookings. Closing a tab/logging out is not a guaranteed immediate location deletion; TTL is the fallback.
+
+## Automated Phase 9 smoke tests
+
+Use a disposable local environment with services running, and gateway rate limiting disabled. Run from the repo root:
+
+```powershell
+.\scripts\smoke-test-driver-flow.ps1
+.\scripts\smoke-test-driver-flow.ps1 -IncludeExpiry
+```
+
+Expected successful totals: 37 checks / 0 failed, or 41 checks / 0 failed with expiry. The optional run waits approximately 26 seconds for the expiry scenario. If you changed offer TTL, pass the same value using -OfferSeconds.
+
+The script creates a passenger, two drivers and bookings. It tests missing/wrong-role tokens, own-location rules, blocked legacy actions, nearest-driver offer, accept/start/complete/history, foreign-driver rejection, in-progress cancel denial, reassignment, exhausted candidates, offer withdrawal and optional expiry. It uses Delhi coordinates; other drivers online there can interfere. Accounts/bookings remain in local databases. Location cleanup normally runs at the end but can be skipped by a crash. Never run it against production.
+
+BookingServiceTest, OfferServiceTest, DriverRideControllerTest and JwtAuthFilterTest are part of the Maven build. These mock-based tests and sequential smoke tests do not prove concurrent driver-reservation safety.
+
+## Earlier-phase tests
 
 ```powershell
 .\scripts\smoke-test-auth.ps1
-```
-
-Known cosmetic issue: on Windows PowerShell 5.1 the line `health status is UP` can report a failure even though the service is UP, because the Actuator content type is returned as bytes.
-
-## Test Phase 3: location
-
-```powershell
-.\scripts\smoke-test-location.ps1      # expect: 14 checks, 0 failed
-```
-
-## Test Phase 4: socket
-
-```powershell
+.\scripts\smoke-test-location.ps1
 .\scripts\smoke-test-socket.ps1
-```
-
-## Test Phase 5: booking
-
-```powershell
-.\scripts\smoke-test-booking.ps1      # expect: 13 checks, 0 failed
-```
-
-## Test Phase 6: review
-
-```powershell
-.\scripts\smoke-test-review.ps1       # expect: 13 checks, 0 failed
-```
-
-## Test Phase 7: gateway
-
-```powershell
+.\scripts\smoke-test-booking.ps1
+.\scripts\smoke-test-review.ps1
 .\scripts\smoke-test-gateway.ps1
 ```
 
-It signs up and logs in through the gateway, checks that bookings without a token give 401 and with a garbage token give 401, calls `/me` with a valid token, puts a driver online, creates a booking with an `Idempotency-Key`, repeats with the same key and checks the same booking comes back, and reads reviews through the gateway.
+Earlier collections/scripts may assume a passenger token can write driver locations or a driver can accept without a live offer. Those assumptions are obsolete after Phase 9; do not treat their old expected totals as current compatibility guarantees. Use the driver-flow script for the new flow. Some Windows PowerShell 5.1 health checks may also misread Actuator response content.
 
-## Test Phase 8: frontend
+## API and matching summary
 
-With the backend running (gateway on 8080):
+Driver signup/login: POST /api/v1/auth/signup/driver and /api/v1/auth/login/driver. Profile: GET /api/v1/auth/driver/me. Driver actions use JWT-derived gateway headers, not a driver id supplied in the body.
 
-```powershell
-cd frontend
-npm install
-npm run dev
-```
+| Driver API | Purpose |
+|---|---|
+| GET /api/v1/driver/dashboard | Active ride and live offers |
+| POST /api/v1/driver/offers/{id}/accept | Confirm a live, owned offer |
+| POST /api/v1/driver/offers/{id}/reject | Reject and try the next candidate |
+| POST /api/v1/driver/rides/{id}/start | CONFIRMED to IN_PROGRESS |
+| POST /api/v1/driver/rides/{id}/complete | IN_PROGRESS to COMPLETED |
+| GET /api/v1/driver/rides | Assigned-driver ride history |
 
-Then in the browser: sign up, tap two map points, press Book ride, watch the status screen, and check My rides. If booking creation fails, check the browser console and the booking-service window; a 409 means no driver was online near the pickup.
-
-## Using IntelliJ instead
-
-Open the repo folder, right-click `backend/pom.xml` and choose Add as Maven Project. Set the project SDK to your JDK (17 or newer) and enable the Lombok plugin and annotation processing. Run each `*Application` class with the green arrow beside its `main` method.
+Matching examines up to 20 nearby candidates, skips tried or busy drivers and offers to one eligible driver at a time. Defaults: BOOKING_SEARCH_RADIUS_KM=5, BOOKING_OFFER_TTL_SECONDS=20, BOOKING_OFFER_MAX_ATTEMPTS=5, BOOKING_OFFER_SWEEP_MS=2000. No initial candidate gives NO_DRIVERS_NEARBY / 409; exhausted reassignment gives NO_DRIVER_AVAILABLE. Successful creation stores the idempotency key; failed creation does not.
 
 ## Troubleshooting
 
-| What you see | Likely cause and fix |
+| Symptom | Check |
 |---|---|
-| `running scripts is disabled on this system` | Run the `Set-ExecutionPolicy -Scope Process ...` line from Step 1 in that window |
-| `Unable to access jarfile ...jar` | The build did not finish. Run `git pull`, then `.\scripts\mvn.ps1 clean install -DskipTests` and look for the first `[ERROR]` line |
-| Frontend shows a network/CORS error | The gateway must be running on 8080; it allows only `http://localhost:5173` |
-| Booking fails with 409 in the frontend | No driver was online near the pickup point; put a driver online first |
-| Gateway returns 401 on a route you expected to work | Send `Authorization: Bearer <token>`; signup and login are the only auth routes that do not need one |
-| Gateway returns 503 with a JSON error | That service is down or its circuit breaker opened; start the service and wait ~10 seconds |
-| Gateway rate limiting returns 429 | Expected with the redis profile after more than 10 quick requests from one IP |
-| Gateway fails to start with the redis profile | Redis is not running: `redis-cli ping` must answer `PONG` |
-| `Port 8080 was already in use` | An old gateway instance is still running |
-| Repeating `Connection refused ... 8761` | Eureka isn't running |
-| Booking returns 503 | location-service is not reachable on port 8082 |
-| Review returns 409 `must be COMPLETED` | Complete the booking first |
-| A test fails | Copy the test name and the first error lines |
+| Cannot delete a target JAR during clean | Stop its service terminal/IDE process, then rebuild. Do not kill every Java process. |
+| Script execution disabled | Set ExecutionPolicy to Bypass for the current process only. |
+| Missing JAR | Check the first build error; require BUILD SUCCESS. |
+| Frontend API/network error | Gateway must be running on 8080; use localhost:5173 for the configured browser origin. |
+| Missing Bearer token during driver login | Verify login URL is /api/v1/auth/login/driver, not /auth/driver/login. Pull current frontend code. |
+| Driver location returns 403 | Use a driver token and its own numeric id. |
+| Driver dashboard 404 | Restart rebuilt gateway; both YAML configurations must route /api/v1/driver/** to booking-service. |
+| Driver dashboard 503 | Check booking-service registration, startup and circuit-breaker fallback. |
+| Starting a trip gives Data truncated | Inspect MySQL booking.status and apply the IN_PROGRESS upgrade if needed. |
+| Booking creation 409 | No eligible nearby driver, possibly because all are busy. |
+| Offer accept 409 | Offer expired/closed or booking changed; refresh dashboard. |
+| Smoke test 429 | Restart gateway without its redis profile; location-service can keep redis. |
+| One-offer assertions fail but accepts succeed | Pull f53014e or later for the PowerShell array-return fix. |
+| Review says booking must be COMPLETED | Finish the trip using the assigned driver. |
+| Port already in use | Stop the old identified service instance before restarting. |
 
-## Docker (final step, not needed yet)
+## Known limitations and next work
 
-`docker-compose.yml` currently covers MySQL, Eureka and auth only. The final stage extends it to every service, switches them to MySQL, Redis (`SPRING_PROFILES_ACTIVE=redis` for location and gateway) and Kafka (`SPRING_PROFILES_ACTIVE=kafka` for booking), and adds a Docker test guide.
+- Passenger booking/review identity checks are not fully bound to the authenticated caller; booking ownership enforcement is pending.
+- Anyone can register as a driver; approval and identity verification are absent.
+- Direct service ports trust headers and bypass the gateway. Keep this project local; service-level authentication and network isolation are pending.
+- Numeric-only gateway location-write matching leaves non-numeric location path authorization to be hardened.
+- Busy-driver checks are not atomic reservations across concurrent bookings. Optimistic locking protects conflicting row updates, not every cross-booking invariant.
+- Multiple schedulers lack distributed coordination and unique live-offer guarantees. Older stranded PENDING bookings fall outside the 15-minute recovery window.
+- Legacy internal completion can bypass the strict driver start-before-complete flow.
+- JWT refresh/revocation, scoped/payload-validated idempotency, event outbox, pagination, migrations and browser automation remain pending.
+- WebSocket UI push, persisted place labels and stronger heartbeat/offline race handling are future work.
 
-## Design notes
+Docker Compose remains partial. Completing deployment with MySQL, Redis and Kafka, infrastructure integration tests and an operational runbook follows application hardening.
 
-See [docs/HLD.md](docs/HLD.md) for diagrams, the data model, the flows and the trade-offs I made on purpose.
+See [docs/HLD.md](docs/HLD.md) for the detailed architecture and trade-offs.
