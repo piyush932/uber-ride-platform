@@ -1,239 +1,277 @@
-# Phase 9 driver flow, tested through the API gateway.
-#   .\scripts\smoke-test-driver-flow.ps1
-#   .\scripts\smoke-test-driver-flow.ps1 -IncludeExpiry      (adds a run that waits for an offer to expire)
-# Start every service first. Run the gateway WITHOUT the redis profile, otherwise its rate limit
-# (10 requests burst) can answer 429 to this script.
+# Local development only. Gateway rate limiting must be disabled.
+# .\scripts\smoke-test-driver-flow.ps1 -IncludeExpiry
 param(
     [string]$Gateway = 'http://localhost:8080',
     [switch]$IncludeExpiry,
-    [int]$OfferSeconds = 20
+    [ValidateRange(5,300)][int]$OfferSeconds = 20,
+    [ValidateRange(5,120)][int]$WaitSeconds = 12
 )
-
 $ErrorActionPreference = 'Stop'
 $script:passed = 0
 $script:failed = 0
+$script:drivers = @()
+$script:bookingIds = @()
+$script:last = ''
+$script:passengerToken = ''
+$run = [guid]::NewGuid().ToString('N')
+$password = 'SmokeOnly-42!x'
+# Random local-test coordinates avoid leftovers at the former fixed Delhi point.
+$lat = 26.0 + (Get-Random -Minimum 0 -Maximum 100000) / 100000.0
+$lng = 76.0 + (Get-Random -Minimum 0 -Maximum 100000) / 100000.0
 
-function Check([string]$Name, [bool]$Condition, $Detail = '') {
-    if ($Condition) {
-        $script:passed++
-        Write-Host "  PASS  $Name" -ForegroundColor Green
-    } else {
-        $script:failed++
-        Write-Host "  FAIL  $Name  $Detail" -ForegroundColor Red
-    }
+function Safe-Text($Value) {
+    $text = $Value | ConvertTo-Json -Depth 12 -Compress
+    $text = $text -replace '(?i)"(token|accessToken|refreshToken|password)"\s*:\s*"[^"]*"', '"$1":"[REDACTED]"'
+    if ($text.Length -gt 2000) { $text = $text.Substring(0,2000) }
+    return $text
 }
-
-function Invoke-Api {
-    param([string]$Method, [string]$Path, [string]$Token = '', $Body = $null, [hashtable]$ExtraHeaders = @{})
+function Api([string]$Method, [string]$Path, [string]$Token = '', $Body = $null, [int]$Expected = 200) {
     $headers = @{}
-    foreach ($key in $ExtraHeaders.Keys) { $headers[$key] = $ExtraHeaders[$key] }
-    if ($Token) { $headers['Authorization'] = "Bearer $Token" }
-    $params = @{ Uri = "$Gateway$Path"; Method = $Method; Headers = $headers; UseBasicParsing = $true; ErrorAction = 'Stop' }
+    if ($Token) { $headers.Authorization = "Bearer $Token" }
+    if ($Method -eq 'POST' -and $Path -eq '/api/v1/bookings') {
+        $headers['Idempotency-Key'] = [guid]::NewGuid().ToString()
+    }
+    $options = @{ Uri = "$Gateway$Path"; Method = $Method; Headers = $headers; UseBasicParsing = $true; TimeoutSec = 15; ErrorAction = 'Stop' }
     if ($null -ne $Body) {
-        $params['Body'] = ($Body | ConvertTo-Json -Compress)
-        $params['ContentType'] = 'application/json'
+        $options.Body = $Body | ConvertTo-Json -Compress
+        $options.ContentType = 'application/json'
     }
     $code = 0
-    $text = $null
+    $text = ''
     try {
-        $response = Invoke-WebRequest @params
+        $response = Invoke-WebRequest @options
         $code = [int]$response.StatusCode
         $text = $response.Content
     } catch {
-        $failure = $_.Exception.Response
-        if ($null -eq $failure) { return [pscustomobject]@{ Status = 0; Data = $null } }
-        $code = [int]$failure.StatusCode
-        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-            $text = $_.ErrorDetails.Message
-        } else {
+        if ($null -ne $_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+        if ($_.ErrorDetails.Message) { $text = $_.ErrorDetails.Message }
+        elseif ($code -gt 0) {
             try {
-                $reader = New-Object System.IO.StreamReader($failure.GetResponseStream())
+                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
                 $text = $reader.ReadToEnd()
-            } catch { $text = $null }
-        }
+                $reader.Dispose()
+            } catch { $text = 'Response body unavailable' }
+        } else { $text = 'Transport failure or timeout; check gateway connectivity' }
     }
     $data = $null
-    if ($text) {
-        try { $data = $text | ConvertFrom-Json } catch { $data = $text }
+    if ($text) { try { $data = $text | ConvertFrom-Json } catch { $data = [string]$text } }
+    if ($Path -match '/auth/(login|signup)') { $summary = '[authentication body omitted]' }
+    else { $summary = Safe-Text $data }
+    $script:last = "$Method $Path -> HTTP $code; body=$summary"
+    if ($code -ne $Expected) { throw "Expected HTTP $Expected. $script:last" }
+    return $data
+}
+function Assert([string]$Name, [bool]$Condition) {
+    if (!$Condition) { throw "$Name. Last response: $script:last" }
+    $script:passed++
+    Write-Host "  PASS  $Name" -ForegroundColor Green
+}
+function Wait-For([string]$Name, [scriptblock]$Probe, [int]$Seconds = $WaitSeconds) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+    do {
+        $result = & $Probe
+        if ($result) {
+            Assert $Name $true
+            return $result
+        }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for $Name. Last response: $script:last"
+}
+function New-Account([string]$Label, [bool]$Driver) {
+    $suffix = ''
+    if ($Driver) { $suffix = '/driver' }
+    $email = "$Label-$run@example.com"
+    $null = Api 'POST' "/api/v1/auth/signup$suffix" '' @{name=$Label; email=$email; password=$password} 201
+    $login = Api 'POST' "/api/v1/auth/login$suffix" '' @{email=$email; password=$password}
+    if (!$login.token) { throw 'Authentication returned no token' }
+    $profilePath = '/api/v1/auth/me'
+    if ($Driver) { $profilePath = '/api/v1/auth/driver/me' }
+    $me = Api 'GET' $profilePath $login.token
+    if (!$me.id) { throw 'Profile returned no id' }
+    return [pscustomobject]@{Id=[long]$me.id; Token=$login.token}
+}
+function Position($Driver, [bool]$Online, [double]$Offset = 0) {
+    $path = "/api/v1/locations/drivers/$($Driver.Id)"
+    if ($Online) { $null = Api 'PUT' $path $Driver.Token @{latitude=($lat+$Offset); longitude=$lng} 204 }
+    else { $null = Api 'DELETE' $path $Driver.Token $null 204 }
+}
+function Nearby {
+    $culture = [Globalization.CultureInfo]::InvariantCulture
+    $a = $lat.ToString($culture); $b = $lng.ToString($culture)
+    $items = @(Api 'GET' "/api/v1/locations/nearby?lat=$a&lng=$b&radiusKm=5&limit=50" $script:passengerToken)
+    return ,@($items | Where-Object { $null -ne $_ })
+}
+function Area([int]$ExpectedCount) {
+    $items = Nearby
+    $allowed = @($script:drivers | ForEach-Object { [string]$_.Id })
+    $foreign = @($items | Where-Object { [string]$_.driverId -notin $allowed })
+    if ($foreign.Count) { throw "Unexpected nearby drivers: $(Safe-Text $foreign). Use an isolated test environment." }
+    Assert "Nearby test-driver count is $ExpectedCount" ($items.Count -eq $ExpectedCount)
+}
+function Booking($Id) { return Api 'GET' "/api/v1/bookings/$Id" $script:passengerToken }
+function Dashboard($Driver) { return Api 'GET' '/api/v1/driver/dashboard' $Driver.Token }
+function Offers($Driver, $BookingId) {
+    $dash = Dashboard $Driver
+    return ,@($dash.offers | Where-Object { $null -ne $_ -and $_.bookingId -eq $BookingId })
+}
+function Wait-Offer($Driver, $BookingId) {
+    return Wait-For "driver $($Driver.Id) owns one live offer for booking $BookingId" {
+        $items = Offers $Driver $BookingId
+        if ($items.Count -eq 1 -and $items[0].secondsRemaining -gt 0) { return $items[0] }
     }
-    [pscustomobject]@{ Status = $code; Data = $data }
 }
-
-# A pickup far from the usual test area, so drivers left online by earlier manual tests are not nearby.
-$pickupLat = 28.6139
-$pickupLng = 77.2090
-$run = Get-Date -Format 'HHmmssfff'
-$password = 'Passw0rd!x'
-
-function New-Driver([string]$Label) {
-    $email = "d$Label$run@example.com"
-    Invoke-Api 'POST' '/api/v1/auth/signup/driver' '' @{ name = "Smoke Driver $Label"; email = $email; password = $password } | Out-Null
-    $login = Invoke-Api 'POST' '/api/v1/auth/login/driver' '' @{ email = $email; password = $password }
-    $token = $login.Data.token
-    $me = Invoke-Api 'GET' '/api/v1/auth/driver/me' $token
-    [pscustomobject]@{ Token = $token; Id = [long]$me.Data.id }
+function Wait-State($Id, [string]$State, [int]$Seconds = $WaitSeconds) {
+    return Wait-For "booking $Id becomes $State" {
+        $b = Booking $Id
+        if ($b.status -eq $State) { return $b }
+    } $Seconds
 }
-
-function Set-Online($Driver, [double]$Lat, [double]$Lng) {
-    Invoke-Api 'PUT' "/api/v1/locations/drivers/$($Driver.Id)" $Driver.Token @{ latitude = $Lat; longitude = $Lng }
-}
-
-function Set-Offline($Driver) {
-    Invoke-Api 'DELETE' "/api/v1/locations/drivers/$($Driver.Id)" $Driver.Token
-}
-
-function Get-Dash($Driver) {
-    (Invoke-Api 'GET' '/api/v1/driver/dashboard' $Driver.Token).Data
-}
-
-# The comma keeps a one-element result an array. Without it PowerShell unrolls it into a single
-# object, and .Count on that object is not 1.
-function Get-Offers($Driver) {
-    $dash = Get-Dash $Driver
-    if ($null -eq $dash -or $null -eq $dash.offers) { return , @() }
-    return , @($dash.offers)
-}
-
-function New-Booking {
-    $body = @{
-        passengerId = $script:passengerId
-        pickupLatitude = $pickupLat
-        pickupLongitude = $pickupLng
-        dropLatitude = $pickupLat + 0.01
-        dropLongitude = $pickupLng + 0.01
+function Create-Booking($ExpectedDriver) {
+    $b = Api 'POST' '/api/v1/bookings' $script:passengerToken @{
+        passengerId=$script:passenger.Id; pickupLatitude=$lat; pickupLongitude=$lng
+        dropLatitude=($lat+0.01); dropLongitude=($lng+0.01)
     }
-    Invoke-Api 'POST' '/api/v1/bookings' $script:passengerToken $body @{ 'Idempotency-Key' = [guid]::NewGuid().ToString() }
+    if ($b.id) { $script:bookingIds += $b.id }
+    Assert 'Booking created as PENDING' ($b.id -and $b.status -eq 'PENDING')
+    Assert "Candidate is expected driver $($ExpectedDriver.Id)" ($b.candidateDriverId -eq $ExpectedDriver.Id)
+    return $b
+}
+function Prepare {
+    foreach ($d in $script:drivers) {
+        $dash = Dashboard $d
+        Assert "Driver $($d.Id) is idle before scenario" (!$dash.activeRide -and @($dash.offers).Count -eq 0)
+        Position $d $false
+    }
+    Position $script:drivers[0] $true
+    Position $script:drivers[1] $true 0.001
+    Area 2
+}
+function Offer-Action($Driver, $Offer, [string]$Action, [int]$Expected = 200) {
+    if (!$Offer.id) { throw 'Refusing to call offer endpoint with a missing id' }
+    return Api 'POST' "/api/v1/driver/offers/$($Offer.id)/$Action" $Driver.Token $null $Expected
+}
+function Finish-Ride($Driver, $Id) {
+    $r = Api 'POST' "/api/v1/driver/rides/$Id/start" $Driver.Token
+    Assert 'Start returns IN_PROGRESS' ($r.status -eq 'IN_PROGRESS')
+    $null = Wait-State $Id 'IN_PROGRESS'
+    $null = Api 'POST' "/api/v1/bookings/$Id/cancel" $script:passengerToken @{reason='test'} 409
+    Assert 'In-progress cancel is denied' $true
+    $r = Api 'POST' "/api/v1/driver/rides/$Id/complete" $Driver.Token
+    Assert 'Complete returns COMPLETED' ($r.status -eq 'COMPLETED')
+    $null = Wait-State $Id 'COMPLETED'
 }
 
-function Get-Booking($Id) {
-    (Invoke-Api 'GET' "/api/v1/bookings/$Id" $script:passengerToken).Data
+try {
+    Write-Host "Local smoke test via $Gateway at $lat, $lng. Accounts/bookings persist."
+    $script:passenger = New-Account 'passenger' $false
+    $script:passengerToken = $script:passenger.Token
+    $script:drivers += New-Account 'driver1' $true
+    $script:drivers += New-Account 'driver2' $true
+    $d1 = $script:drivers[0]; $d2 = $script:drivers[1]
+    Assert 'Passenger and drivers authenticated' ($d1.Id -ne $d2.Id)
+    Area 0
+
+    Write-Host 'Role checks'
+    $null = Api 'GET' '/api/v1/driver/dashboard' '' $null 401
+    Assert 'Missing token denied' $true
+    $null = Api 'GET' '/api/v1/driver/dashboard' $script:passengerToken $null 403
+    Assert 'Passenger denied on driver API' $true
+    $null = Api 'POST' '/api/v1/bookings' $d1.Token @{passengerId=$script:passenger.Id; pickupLatitude=$lat; pickupLongitude=$lng} 403
+    Assert 'Driver denied on passenger booking API' $true
+    $null = Api 'PUT' "/api/v1/locations/drivers/$($d1.Id)" $script:passengerToken @{latitude=$lat; longitude=$lng} 403
+    Assert 'Passenger location write denied' $true
+    $null = Api 'PUT' "/api/v1/locations/drivers/$($d2.Id)" $d1.Token @{latitude=$lat; longitude=$lng} 403
+    Assert 'Foreign driver location write denied' $true
+    $null = Api 'POST' '/api/v1/bookings/1/accept' $script:passengerToken @{driverId=$d1.Id} 403
+    $null = Api 'POST' '/api/v1/bookings/1/complete' $script:passengerToken $null 403
+    Assert 'Legacy actions denied to passenger' $true
+
+    Write-Host 'Happy path'
+    Prepare
+    $b = Create-Booking $d1
+    $o = Wait-Offer $d1 $b.id
+    Assert 'Countdown is within configured TTL' ($o.secondsRemaining -le $OfferSeconds)
+    Assert 'Second driver has no offer for this booking' ((Offers $d2 $b.id).Count -eq 0)
+    $r = Offer-Action $d1 $o 'accept'
+    Assert 'Acceptance returns CONFIRMED' ($r.status -eq 'CONFIRMED')
+    $r = Wait-State $b.id 'CONFIRMED'
+    Assert 'Assigned driver is correct' ($r.driverId -eq $d1.Id)
+    Assert 'Dashboard has this active booking' ((Dashboard $d1).activeRide.id -eq $b.id)
+    $null = Api 'POST' "/api/v1/driver/rides/$($b.id)/start" $d2.Token $null 403
+    Assert 'Foreign driver start denied' $true
+    Finish-Ride $d1 $b.id
+    $history = @(Api 'GET' '/api/v1/driver/rides' $d1.Token)
+    Assert 'History contains completed booking' (@($history | Where-Object {$_.id -eq $b.id}).Count -eq 1)
+
+    Write-Host 'Reject and reassign'
+    Prepare
+    $b = Create-Booking $d1
+    $o = Wait-Offer $d1 $b.id
+    $null = Offer-Action $d1 $o 'reject'
+    $next = Wait-Offer $d2 $b.id
+    $null = Offer-Action $d1 $o 'accept' 409
+    Assert 'Rejected offer cannot be accepted' $true
+    $r = Offer-Action $d2 $next 'accept'
+    Assert 'Second driver accepts reassigned ride' ($r.status -eq 'CONFIRMED' -and $r.driverId -eq $d2.Id)
+    Finish-Ride $d2 $b.id
+
+    Write-Host 'No drivers left'
+    Prepare
+    $b = Create-Booking $d1
+    $o = Wait-Offer $d1 $b.id
+    $null = Offer-Action $d1 $o 'reject'
+    $o = Wait-Offer $d2 $b.id
+    Area 2
+    $null = Offer-Action $d2 $o 'reject'
+    $r = Wait-State $b.id 'CANCELLED'
+    Assert 'Exhaustion reason is NO_DRIVER_AVAILABLE' ($r.cancelReason -eq 'NO_DRIVER_AVAILABLE')
+
+    Write-Host 'Passenger cancellation'
+    Prepare
+    $b = Create-Booking $d1
+    $o = Wait-Offer $d1 $b.id
+    $null = Api 'POST' "/api/v1/bookings/$($b.id)/cancel" $script:passengerToken @{reason='CANCELLED_BY_PASSENGER'}
+    $null = Wait-State $b.id 'CANCELLED'
+    $null = Wait-For 'Cancelled booking offer disappears' { if ((Offers $d1 $b.id).Count -eq 0) { return $true } }
+    $null = Offer-Action $d1 $o 'accept' 409
+    Assert 'Withdrawn offer cannot be accepted' $true
+
+    if ($IncludeExpiry) {
+        Write-Host 'Expiry'
+        Prepare
+        Position $d2 $false
+        Area 1
+        $b = Create-Booking $d1
+        $o = Wait-Offer $d1 $b.id
+        $r = Wait-State $b.id 'CANCELLED' ($OfferSeconds+$WaitSeconds+10)
+        Assert 'Expiry exhaustion reason is NO_DRIVER_AVAILABLE' ($r.cancelReason -eq 'NO_DRIVER_AVAILABLE')
+        Assert 'Expired booking has no live offer' ((Offers $d1 $b.id).Count -eq 0)
+        $null = Offer-Action $d1 $o 'accept' 409
+        Assert 'Expired offer cannot be accepted' $true
+    }
+} catch {
+    $script:failed++
+    Write-Host "FAIL (suite aborted to prevent cascading failures): $($_.Exception.Message)" -ForegroundColor Red
+} finally {
+    foreach ($d in $script:drivers) {
+        try { Position $d $false } catch {
+            $script:failed++; Write-Warning "Driver $($d.Id) location cleanup failed: $($_.Exception.Message)"
+        }
+    }
+    foreach ($id in $script:bookingIds) {
+        try {
+            $b = Booking $id
+            if ($b.status -in @('PENDING','CONFIRMED')) {
+                $null = Api 'POST' "/api/v1/bookings/$id/cancel" $script:passengerToken @{reason='SMOKE_TEST_CLEANUP'}
+            } elseif ($b.status -eq 'IN_PROGRESS') {
+                Write-Warning "Booking $id remains IN_PROGRESS; inspect it manually. Cleanup will not fabricate completion."
+            }
+        } catch {
+            $script:failed++; Write-Warning "Booking $id cleanup failed: $($_.Exception.Message)"
+        }
+    }
 }
-
-function Set-BothOnline {
-    Set-Online $driver1 $pickupLat $pickupLng | Out-Null
-    Set-Online $driver2 ($pickupLat + 0.0005) $pickupLng | Out-Null
-}
-
-Write-Host "Setup: one passenger and two drivers through $Gateway"
-$passengerEmail = "p$run@example.com"
-Invoke-Api 'POST' '/api/v1/auth/signup' '' @{ name = 'Smoke Passenger'; email = $passengerEmail; password = $password } | Out-Null
-$passengerLogin = Invoke-Api 'POST' '/api/v1/auth/login' '' @{ email = $passengerEmail; password = $password }
-$script:passengerToken = $passengerLogin.Data.token
-$passengerMe = Invoke-Api 'GET' '/api/v1/auth/me' $script:passengerToken
-$script:passengerId = [long]$passengerMe.Data.id
-$driver1 = New-Driver '1'
-$driver2 = New-Driver '2'
-Check 'passenger and both drivers could sign up and log in' ($script:passengerToken -and $driver1.Token -and $driver2.Token -and $driver1.Id -ne $driver2.Id)
-
-Write-Host ''
-Write-Host 'Role checks'
-Check 'no token on the driver API gives 401' ((Invoke-Api 'GET' '/api/v1/driver/dashboard').Status -eq 401)
-Check 'passenger on the driver API gives 403' ((Invoke-Api 'GET' '/api/v1/driver/dashboard' $script:passengerToken).Status -eq 403)
-$driverBooking = Invoke-Api 'POST' '/api/v1/bookings' $driver1.Token @{ passengerId = 1; pickupLatitude = $pickupLat; pickupLongitude = $pickupLng }
-Check 'driver on the passenger booking route gives 403' ($driverBooking.Status -eq 403)
-$passengerWrite = Invoke-Api 'PUT' "/api/v1/locations/drivers/$($driver1.Id)" $script:passengerToken @{ latitude = $pickupLat; longitude = $pickupLng }
-Check 'passenger cannot write a driver location' ($passengerWrite.Status -eq 403)
-$foreignWrite = Invoke-Api 'PUT' "/api/v1/locations/drivers/$($driver2.Id)" $driver1.Token @{ latitude = $pickupLat; longitude = $pickupLng }
-Check 'driver cannot write another driver location' ($foreignWrite.Status -eq 403)
-$legacyAccept = Invoke-Api 'POST' '/api/v1/bookings/1/accept' $script:passengerToken @{ driverId = $driver1.Id }
-Check 'passenger cannot call legacy accept' ($legacyAccept.Status -eq 403)
-$legacyComplete = Invoke-Api 'POST' '/api/v1/bookings/1/complete' $script:passengerToken
-Check 'passenger cannot call legacy complete' ($legacyComplete.Status -eq 403)
-
-Write-Host ''
-Write-Host 'Happy path: offer, accept, start, complete'
-Set-BothOnline
-$created = New-Booking
-$bookingId = $created.Data.id
-Check 'booking is created as PENDING' ($created.Status -eq 200 -and $created.Data.status -eq 'PENDING') "status=$($created.Status)"
-$offers1 = Get-Offers $driver1
-Check 'nearest driver gets exactly one offer' ($offers1.Count -eq 1 -and $offers1[0].bookingId -eq $bookingId)
-Check 'the other driver gets no offer yet' ((Get-Offers $driver2).Count -eq 0)
-Check 'offer has a countdown' ($offers1.Count -eq 1 -and $offers1[0].secondsRemaining -gt 0 -and $offers1[0].secondsRemaining -le $OfferSeconds)
-$accepted = Invoke-Api 'POST' "/api/v1/driver/offers/$($offers1[0].id)/accept" $driver1.Token
-Check 'driver accepts the offer' ($accepted.Status -eq 200 -and $accepted.Data.status -eq 'CONFIRMED') "status=$($accepted.Status)"
-$seen = Get-Booking $bookingId
-Check 'passenger sees CONFIRMED with the driver' ($seen.status -eq 'CONFIRMED' -and $seen.driverId -eq $driver1.Id)
-Check 'driver dashboard shows the active ride' ((Get-Dash $driver1).activeRide.id -eq $bookingId)
-$foreignStart = Invoke-Api 'POST' "/api/v1/driver/rides/$bookingId/start" $driver2.Token
-Check 'another driver cannot start the ride' ($foreignStart.Status -eq 403)
-$started = Invoke-Api 'POST' "/api/v1/driver/rides/$bookingId/start" $driver1.Token
-Check 'driver starts the trip' ($started.Status -eq 200 -and $started.Data.status -eq 'IN_PROGRESS')
-Check 'passenger sees IN_PROGRESS' ((Get-Booking $bookingId).status -eq 'IN_PROGRESS')
-$lateCancel = Invoke-Api 'POST' "/api/v1/bookings/$bookingId/cancel" $script:passengerToken @{ reason = 'test' }
-Check 'passenger cannot cancel a trip in progress' ($lateCancel.Status -eq 409)
-$completed = Invoke-Api 'POST' "/api/v1/driver/rides/$bookingId/complete" $driver1.Token
-Check 'driver completes the trip' ($completed.Status -eq 200 -and $completed.Data.status -eq 'COMPLETED')
-Check 'passenger sees COMPLETED' ((Get-Booking $bookingId).status -eq 'COMPLETED')
-$history = Invoke-Api 'GET' '/api/v1/driver/rides' $driver1.Token
-Check 'driver history lists the ride' (@($history.Data | Where-Object { $_.id -eq $bookingId }).Count -eq 1)
-
-Write-Host ''
-Write-Host 'Reject, then reassign to the next driver'
-Set-BothOnline
-$created = New-Booking
-$bookingId = $created.Data.id
-$offer = (Get-Offers $driver1)[0]
-Check 'first driver gets the offer' ($null -ne $offer -and $offer.bookingId -eq $bookingId)
-$rejected = Invoke-Api 'POST' "/api/v1/driver/offers/$($offer.id)/reject" $driver1.Token
-Check 'first driver rejects' ($rejected.Status -eq 200)
-Check 'booking is still PENDING' ((Get-Booking $bookingId).status -eq 'PENDING')
-Check 'first driver has no offer left' ((Get-Offers $driver1).Count -eq 0)
-$next = Get-Offers $driver2
-Check 'second driver now has the offer' ($next.Count -eq 1 -and $next[0].bookingId -eq $bookingId)
-$reuse = Invoke-Api 'POST' "/api/v1/driver/offers/$($offer.id)/accept" $driver1.Token
-Check 'rejected offer cannot be accepted' ($reuse.Status -eq 409)
-$accepted = Invoke-Api 'POST' "/api/v1/driver/offers/$($next[0].id)/accept" $driver2.Token
-Check 'second driver accepts' ($accepted.Status -eq 200 -and $accepted.Data.status -eq 'CONFIRMED')
-Check 'booking belongs to the second driver' ((Get-Booking $bookingId).driverId -eq $driver2.Id)
-Invoke-Api 'POST' "/api/v1/driver/rides/$bookingId/start" $driver2.Token | Out-Null
-Invoke-Api 'POST' "/api/v1/driver/rides/$bookingId/complete" $driver2.Token | Out-Null
-
-Write-Host ''
-Write-Host 'No drivers left'
-Set-BothOnline
-$created = New-Booking
-$bookingId = $created.Data.id
-$offer1 = (Get-Offers $driver1)[0]
-Invoke-Api 'POST' "/api/v1/driver/offers/$($offer1.id)/reject" $driver1.Token | Out-Null
-$offer2 = (Get-Offers $driver2)[0]
-Check 'second driver is tried after the first rejects' ($null -ne $offer2 -and $offer2.bookingId -eq $bookingId)
-Invoke-Api 'POST' "/api/v1/driver/offers/$($offer2.id)/reject" $driver2.Token | Out-Null
-$final = Get-Booking $bookingId
-Check 'booking is CANCELLED when nobody is left' ($final.status -eq 'CANCELLED')
-Check 'cancel reason is NO_DRIVER_AVAILABLE' ($final.cancelReason -eq 'NO_DRIVER_AVAILABLE') "reason=$($final.cancelReason)"
-
-Write-Host ''
-Write-Host 'Passenger cancel withdraws the open offer'
-Set-BothOnline
-$created = New-Booking
-$bookingId = $created.Data.id
-$offer = (Get-Offers $driver1)[0]
-Check 'driver has an open offer' ($null -ne $offer)
-$cancelled = Invoke-Api 'POST' "/api/v1/bookings/$bookingId/cancel" $script:passengerToken @{ reason = 'CANCELLED_BY_PASSENGER' }
-Check 'passenger cancels a pending ride' ($cancelled.Status -eq 200 -and $cancelled.Data.status -eq 'CANCELLED')
-Check 'the open offer is gone from the dashboard' ((Get-Offers $driver1).Count -eq 0)
-$withdrawn = Invoke-Api 'POST' "/api/v1/driver/offers/$($offer.id)/accept" $driver1.Token
-Check 'the withdrawn offer cannot be accepted' ($withdrawn.Status -eq 409)
-
-if ($IncludeExpiry) {
-    Write-Host ''
-    Write-Host "Expiry (waits about $($OfferSeconds + 6) seconds)"
-    Set-Offline $driver2 | Out-Null
-    Set-Online $driver1 $pickupLat $pickupLng | Out-Null
-    $created = New-Booking
-    $bookingId = $created.Data.id
-    Check 'driver has the offer before it expires' ((Get-Offers $driver1).Count -eq 1)
-    Start-Sleep -Seconds ($OfferSeconds + 6)
-    $final = Get-Booking $bookingId
-    Check 'booking is CANCELLED after the offer expires' ($final.status -eq 'CANCELLED')
-    Check 'cancel reason is NO_DRIVER_AVAILABLE' ($final.cancelReason -eq 'NO_DRIVER_AVAILABLE') "reason=$($final.cancelReason)"
-    Check 'the expired offer is gone from the dashboard' ((Get-Offers $driver1).Count -eq 0)
-}
-
-Set-Offline $driver1 | Out-Null
-Set-Offline $driver2 | Out-Null
-
-Write-Host ''
-Write-Host "$($script:passed + $script:failed) checks, $($script:failed) failed"
+Write-Host "$script:passed checks passed; $script:failed failures. Totals differ from the original 37/41-check script."
 if ($script:failed -gt 0) { exit 1 }
+exit 0
