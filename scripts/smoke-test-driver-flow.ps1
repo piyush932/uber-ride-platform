@@ -86,9 +86,12 @@ function Get-Dash($Driver) {
     (Invoke-Api 'GET' '/api/v1/driver/dashboard' $Driver.Token).Data
 }
 
+# The comma keeps a one-element result an array. Without it PowerShell unrolls it into a single
+# object, and .Count on that object is not 1.
 function Get-Offers($Driver) {
     $dash = Get-Dash $Driver
-    @($dash.offers)
+    if ($null -eq $dash -or $null -eq $dash.offers) { return , @() }
+    return , @($dash.offers)
 }
 
 function New-Booking {
