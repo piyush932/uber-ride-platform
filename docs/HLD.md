@@ -1,216 +1,209 @@
 # High-Level Design
 
-This document covers the whole target system, and says clearly which parts exist today.
+## 1. Scope and verification status
 
-## 1. Goal
+The platform models passenger booking, driver matching, trip execution and reviews. Phases 1-8 provide the service foundation and passenger UI. Phase 9 adds driver authentication, a separate portal, location heartbeats, persisted offers, expiry, reassignment and driver trip actions. Both UIs still poll; WebSocket subscriptions in the React apps are not implemented.
 
-Simulate the core flow of a ride-hailing app: a passenger requests a ride, nearby drivers are found, one driver is notified instantly, accepts, the ride is completed, and the passenger can review the driver. The point is to practise the distributed-systems problems behind that flow, not to clone a product.
+The user confirmed the backend build succeeds. Local smoke-test output demonstrated acceptance, reassignment, trip start/completion, cancellation, expiry and role checks. Four single-offer assertions failed in the expiry-inclusive run; the PowerShell array-return fix was pushed as f53014e. A zero-failure rerun has not yet been explicitly reported. Frontend browser verification and concurrency/infrastructure integration tests remain separate from a successful Maven build.
 
-## 2. What is built (Phase 1-8)
+## 2. Implemented architecture
 
 ```mermaid
 flowchart LR
-    UI[React passenger app :5173] -->|HTTP + JWT| GW[api-gateway :8080]
-    GW -->|JWT check| A[auth-service :8081]
-    GW --> B[booking-service :8084]
-    GW --> L[location-service :8082]
-    GW --> R[review-service :8085]
-    B -->|nearest driver| L
-    B -->|notify driver, circuit breaker| S[socket-service :8083]
-    S -->|driver accepts| B
-    R -->|is it COMPLETED?| B
-    A --> E[eureka-server :8761]
-    L --> E
-    S --> E
-    B --> E
-    R --> E
-    GW --> E
-    A -->|JPA| M[(H2, or MySQL uber_auth)]
-    B -->|JPA| M2[(H2, or MySQL uber_booking)]
-    R -->|JPA| M3[(H2, or MySQL uber_review)]
-    L --> ST[(in-memory store, or Redis GEO)]
-    GW -. optional rate limit .-> RD[(Redis)]
-    B -. events .-> EV[(log publisher, or Kafka)]
+    P[Passenger UI] --> GW[API gateway :8080]
+    D[Driver portal] --> GW
+    GW --> A[Auth :8081]
+    GW --> L[Location :8082]
+    GW --> B[Booking :8084]
+    GW --> R[Review :8085]
+    B -->|Candidate lookup| L
+    B -->|Best-effort notification| S[Socket :8083]
+    S -->|Legacy accept| B
+    R -->|Booking lookup| B
+    A --> AD[(Auth database)]
+    B --> BD[(Booking database)]
+    R --> RD[(Review database)]
+    L --> LS[(Memory or Redis GEO)]
+    GW -. Rate limit profile .-> Redis[(Redis)]
+    B -. Event publisher .-> Events[Log or Kafka profile]
+    E[Eureka :8761] -. Discovery .-> GW
 ```
 
-## 3. Target architecture (all phases)
+Backend services register with Eureka. Gateway routes use load-balanced service names. React 18, Vite and Leaflet run on port 5173; the development proxy forwards /api to port 8080 without stripping the prefix. Java targets version 17. The shared entity-service is a library, not a running service.
 
-```mermaid
-flowchart TB
-    UI[React frontend] --> GW[API gateway :8080]
-    GW --> AUTH[auth-service]
-    GW --> BOOK[booking-service]
-    GW --> LOC[location-service]
-    GW --> REV[review-service]
-    BOOK -->|nearby drivers| LOC
-    BOOK -->|notify driver| SOCK[socket-service]
-    SOCK -->|WebSocket/STOMP| UI
-    SOCK -->|driver accepts| BOOK
-    BOOK -->|booking events| K[(Kafka)]
-    K --> REV
-    LOC --> R[(Redis GEO)]
-    AUTH --> DB1[(DB)]
-    BOOK --> DB2[(DB)]
-    REV --> DB3[(DB)]
-    AUTH & BOOK & LOC & SOCK & REV & GW --> EU[Eureka]
-```
+| Concern | Default | Optional profile |
+|---|---|---|
+| Auth, booking and review persistence | H2 | mysql, separate uber_auth / uber_booking / uber_review databases |
+| Driver positions | In-memory store | redis |
+| Gateway rate limiting | Disabled | redis |
+| Booking events | Log publisher | kafka |
+| Review validation | Synchronous REST booking lookup | Kafka-based decoupling remains a target |
 
-Phase 8 adds the React passenger frontend (built): login/signup, Leaflet map booking with an idempotency key, ride status by polling every 3 seconds, and a my-rides list. Live WebSocket push to the passenger screen and the driver panel are deferred to a later phase. The final phase adds Docker Compose for every service with MySQL, Redis and Kafka.
+Docker Compose does not yet represent a complete deployment of every service.
 
-## 4. Local mode and Docker mode
+## 3. Authentication and gateway boundary
 
-Every service has two ways to run, chosen by a Spring profile, so the same code is tested locally first and in Docker last:
+Passenger auth uses /api/v1/auth/signup, /login and /me. Driver signup and login use /api/v1/auth/signup/driver and /login/driver; driver profile uses /api/v1/auth/driver/me. Driver JWTs include role=DRIVER and numeric userId. Passenger and driver browser storage keys are separate; main.jsx selects separate layouts.
 
-| Concern | Local default | Real store (profile) | Used in |
-|---------|---------------|----------------------|---------|
-| Auth database | H2 in memory | MySQL, profile `mysql` | local with MySQL installed, Docker |
-| Booking database | H2 in memory | MySQL, profile `mysql` | local with MySQL installed, Docker |
-| Review database | H2 in memory | MySQL, profile `mysql` | local with MySQL installed, Docker |
-| Driver locations | In-memory store | Redis GEO, profile `redis` | local with Redis installed, Docker |
-| Gateway rate limiting | Off | Redis, profile `redis` | local with Redis installed, Docker |
-| Booking events | Logged by an in-process publisher | Kafka, profile `kafka` | Docker stage |
-| Review trigger | Review-service calls booking-service | Kafka consumer of `BOOKING_COMPLETED` | Docker stage |
-| Service discovery | Eureka on localhost | Eureka container | Docker |
+The gateway strips client-supplied X-User-* headers before forwarding. For authenticated requests it derives X-User-Email and X-User-Role from verified claims, and X-User-Id when a numeric userId claim exists. Older passenger tokens can lack an id claim.
 
-The in-memory and real implementations sit behind the same interface (`LocationStore`, `BookingEventPublisher`), which is also a useful design point to explain in an interview.
+| Caller | Access policy |
+|---|---|
+| Unauthenticated | Exact public auth paths, health and fallback paths; protected routes return 401 |
+| Driver | Driver API paths, driver profile path, and PUT/DELETE on its own numeric location id; other protected paths return 403 |
+| Passenger | Existing passenger routes; driver API/profile paths, numeric driver location writes and legacy booking accept/complete paths are blocked |
 
-## 5. Gateway flow (built)
+Routes /api/v1/bookings/** and /api/v1/driver/** reach booking-service in both gateway YAML configurations. Auth, locations and reviews retain separate routes. Driver and booking routes share bookingCB and the booking fallback. With the Redis profile the driver route allows 5 requests per second with burst 20, keyed by the existing rate-limit policy.
+
+Important: these are implemented path rules, not full resource authorization. Driver controllers validate role and offer/ride ownership using trusted headers. Passenger booking endpoints still trust supplied passenger ids and lack ownership checks. Location accepts string ids, whereas the gateway location-write matcher recognizes numeric ids; passenger authorization for non-numeric location paths needs hardening. Direct service-port access bypasses the gateway and can forge identity headers. This is a local-development trust boundary, not production-grade service authentication.
+
+## 4. Availability and matching
+
+The driver selects a location by map click or geolocation. Going online sends PUT /api/v1/locations/drivers/{id}, then repeats every 5 seconds. Going offline sends DELETE. Location TTL removes stale positions. Logout/unmount removal is best effort; page termination and network loss cannot guarantee immediate deletion.
+
+Booking creation saves PENDING, then asks location-service for up to 20 nearest candidates within the configured radius (default 5 km). Matching skips non-numeric ids, drivers already tried for this booking, drivers with live offers and drivers with CONFIRMED or IN_PROGRESS rides. The first eligible candidate receives an OFFERED row.
+
+| Setting | Default |
+|---|---|
+| BOOKING_OFFER_TTL_SECONDS | 20 seconds |
+| BOOKING_OFFER_MAX_ATTEMPTS | 5 offers per booking |
+| BOOKING_OFFER_SWEEP_MS | 2000 milliseconds |
+
+No eligible initial candidate produces CANCELLED / NO_DRIVERS_NEARBY and HTTP 409. Initial location lookup failure produces CANCELLED / BOOKING_FAILED and HTTP 503. Creation uses noRollbackFor=ResponseStatusException so these cancellations persist. Idempotency records are saved only after a successful offer; unsuccessful creation does not reserve its key. Existing keys return the associated booking. Keys are neither passenger-scoped nor payload-validated and need further hardening.
+
+## 5. Offer and trip flow
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant GW as api-gateway
-    participant F as JwtAuthFilter
-    participant S as Service
-
-    C->>GW: request with Bearer token
-    GW->>F: filter
-    alt public path (signup, login, health)
-        F->>S: forward
-    else valid token
-        F->>F: verify signature + expiry
-        F->>S: forward with X-User-Email
-    else missing / bad / expired token
-        F-->>C: 401 JSON
+    participant P as Passenger UI
+    participant G as Gateway
+    participant B as Booking service
+    participant L as Location service
+    participant D as Driver UI
+    P->>G: POST /api/v1/bookings with Idempotency-Key
+    G->>B: Forward authenticated request
+    B->>L: Lookup nearest candidates
+    L-->>B: Candidate list
+    B->>B: Persist PENDING booking and OFFERED row
+    B-->>P: Booking and candidate id
+    D->>G: GET /api/v1/driver/dashboard
+    G->>B: Forward verified driver headers
+    B-->>D: Active ride and live offers
+    alt Accept before expiry
+        D->>G: POST /api/v1/driver/offers/{id}/accept
+        G->>B: Forward
+        B->>B: ACCEPTED offer and CONFIRMED booking
+    else Reject or expiry
+        B->>B: Close offer and try next untried candidate
     end
-    Note over GW,S: circuit breaker per route, JSON 503 fallback when open
+    D->>G: POST /api/v1/driver/rides/{id}/start
+    G->>B: CONFIRMED to IN_PROGRESS
+    D->>G: POST /api/v1/driver/rides/{id}/complete
+    G->>B: IN_PROGRESS to COMPLETED
+    P->>G: Poll booking status
 ```
 
-Routes: `/api/v1/auth/**` to auth-service, `/api/v1/bookings/**` to booking-service, `/api/v1/locations/**` to location-service, `/api/v1/reviews/**` to review-service, all via Eureka (`lb://`). Socket-service REST is not exposed through the gateway; drivers use WebSocket and booking-service calls it internally. The gateway allows browser calls only from `http://localhost:5173` (CORS).
-
-## 6. Ride request flow (built)
+Driver dashboard and passenger ride status refresh approximately every 3 seconds plus request time. Offer responses include expiresAt and secondsRemaining; the browser displays a local countdown, but server time controls acceptance. Driver history is GET /api/v1/driver/rides.
 
 ```mermaid
-sequenceDiagram
-    participant P as Passenger
-    participant UI as React app
-    participant GW as api-gateway
-    participant B as booking-service
-    participant L as location-service
-    participant S as socket-service
-    participant D as Driver app
-
-    P->>UI: pick pickup and dropoff on the map
-    UI->>GW: POST /bookings (Idempotency-Key)
-    GW->>GW: JWT check
-    GW->>B: forward
-    B->>B: idempotency key seen? return same booking
-    B->>B: save booking as PENDING
-    B->>L: GET /nearby (5 km, nearest first, limit 1)
-    L-->>B: nearest driver
-    B->>S: POST /rides/notify (circuit breaker)
-    S-->>D: STOMP push on /topic/drivers/{id}/rides
-    D->>S: STOMP /app/rides/accept
-    S->>B: POST /bookings/{id}/accept
-    B->>B: PENDING to CONFIRMED (version check)
-    B-->>S: 200 confirmed
-    S-->>D: /topic/bookings/{id} CONFIRMED
-    UI->>GW: GET /bookings/{id} every 3s (polling)
-    P->>GW: POST /bookings/{id}/complete
-    GW->>B: forward
-    B->>B: CONFIRMED to COMPLETED + BOOKING_COMPLETED event
+stateDiagram-v2
+    [*] --> PENDING
+    PENDING --> CONFIRMED: Accept live offer
+    PENDING --> CANCELLED: Cancel or matching failure
+    CONFIRMED --> IN_PROGRESS: Assigned driver starts
+    CONFIRMED --> CANCELLED: Passenger cancels
+    IN_PROGRESS --> COMPLETED: Assigned driver completes
+    COMPLETED --> [*]
+    CANCELLED --> [*]
 ```
 
-If no driver is nearby the booking is saved as CANCELLED with reason `NO_DRIVERS_NEARBY` and the caller gets a 409. If socket-service is down, the circuit breaker opens after repeated failures and the booking stays PENDING. If location-service is down, the caller gets a 503.
+An OFFERED row transitions to ACCEPTED, REJECTED, EXPIRED or WITHDRAWN. Passenger cancellation is allowed only for PENDING/CONFIRMED and withdraws open offers. The passenger UI no longer exposes completion. The legacy internal complete endpoint still accepts CONFIRMED or IN_PROGRESS, so the strict start-before-complete rule applies to the driver API, not every direct internal call. Legacy accept requires a matching live offer, but direct internal endpoint authentication remains a gap.
 
-## 7. Review flow (built)
+## 6. Expiry, recovery and consistency limits
 
-```mermaid
-sequenceDiagram
-    participant P as Passenger
-    participant GW as api-gateway
-    participant R as review-service
-    participant B as booking-service
-    participant DB as review DB
+OfferExpiryJob runs with fixed delay. Each expired-offer action executes through a transactional DriverRideService method, closes the offer and attempts reassignment. Rejection also attempts reassignment. No remaining eligible candidate or attempt-cap exhaustion produces CANCELLED / NO_DRIVER_AVAILABLE.
 
-    P->>GW: POST /reviews (bookingId, passengerId, rating)
-    GW->>GW: JWT check
-    GW->>R: forward
-    R->>B: GET /bookings/{id}
-    B-->>R: booking (status, passengerId, driverId)
-    R->>R: booking COMPLETED? passenger matches? not already reviewed?
-    R->>DB: insert review
-    R-->>P: 201 review
-```
+If location lookup fails during reassignment, the closed offer can persist while the booking stays PENDING. A subsequent sweep looks for PENDING bookings without OFFERED rows, but only within a 15-minute creation window. Older stranded bookings require operational recovery.
 
-Rules: one review per booking, only the booking's passenger can write it, rating must be 1-5, and the booking must be COMPLETED.
+Offers and bookings have @Version fields. Concurrent writes to the same persisted row can conflict rather than silently overwrite one another. This is not an atomic driver-reservation mechanism: two distinct booking transactions can both observe the same driver as free and create separate offers. Concurrent sweeps/reassignments also lack a unique live-offer constraint or distributed lock. The intended single-offer/single-active-ride rules are best-effort checks, not proven cross-booking invariants. Before multi-instance or production use, add atomic driver reservation, serialized dispatch, database constraints and concurrency integration tests.
 
-## 8. Data model
+Socket notification is best effort behind a circuit breaker; dashboard polling does not depend on delivery. Events publish through BookingEventPublisher without a transactional outbox. Atomic database/event delivery and at-least-once delivery are not guaranteed by the current implementation.
+
+## 7. Persistence model and schema upgrade
 
 ```mermaid
 erDiagram
     PASSENGER ||--o{ BOOKING : requests
-    DRIVER ||--o{ BOOKING : fulfils
+    DRIVER ||--o{ BOOKING : assigned
+    BOOKING ||--o{ RIDE_OFFER : attempts
+    DRIVER ||--o{ RIDE_OFFER : receives
     BOOKING ||--o| REVIEW : receives
-    BOOKING ||--o{ IDEMPOTENCY_RECORD : keyed by
-    PASSENGER { long id string name string email string password }
-    DRIVER { long id string name string email string password }
-    BOOKING { long id string status long passengerId long driverId double pickupLatitude double pickupLongitude long version }
-    REVIEW { long id long bookingId long passengerId long driverId int rating string comment }
-    IDEMPOTENCY_RECORD { long id string idempotencyKey long bookingId }
+    BOOKING ||--o{ IDEMPOTENCY_RECORD : keyed
+    BOOKING {
+        long id PK
+        string status
+        long passengerId
+        long driverId
+        double pickupLatitude
+        double pickupLongitude
+        double dropLatitude
+        double dropLongitude
+        string cancelReason
+        long version
+    }
+    RIDE_OFFER {
+        long id PK
+        long bookingId
+        long driverId
+        string status
+        instant expiresAt
+        instant createdAt
+        long version
+    }
 ```
 
-Booking references passengers and drivers by plain id, not by a foreign key, because they live in other services' databases. Booking status values: PENDING, CONFIRMED, COMPLETED, CANCELLED. The `version` column is for optimistic locking. Review has a unique constraint on `bookingId`. IdempotencyRecord has a unique constraint on `idempotencyKey`.
+Diagram relationships are logical; passenger and driver references cross service databases and are plain ids. Review has a unique bookingId; IdempotencyRecord has a unique idempotencyKey. RideOffer lives in booking-service and is included in its entity scan.
 
-## 9. Decisions and trade-offs
+Before upgrading an existing local MySQL booking database, inspect the schema and back up important data. If status is a native enum missing IN_PROGRESS, widen it while booking-service is stopped:
 
-| Decision | Why | Cost / what I'd change |
-|----------|-----|------------------------|
-| Stateless JWT instead of sessions | Any instance can verify a token, no shared session store | Tokens can't be revoked before expiry; a refresh-token flow would fix this |
-| Gateway checks JWT | One place to stop unauthenticated traffic before it reaches services | Services should still defend themselves (defence in depth) |
-| X-User-Email header downstream | Services can know who called without parsing the token again | A malicious direct call could fake it; in production the gateway port is the only public one |
-| Circuit breakers per route | One slow service does not tie up the whole gateway | A fallback is generic; per-route fallbacks could be smarter |
-| Resilience4j around booking -> socket | Socket being down does not hang or fail booking creation | The booking stays PENDING with no driver notified; a retry/re-dispatch flow is still missing |
-| Idempotency key on booking creation | A retried request cannot create a second booking | The key is stored forever; production would add a TTL or cleanup job |
-| Shared `entity-service` library | One definition of the core entities | Compile-time coupling; review-service owns its own entity instead |
-| Database per service | Services can evolve schemas independently | No cross-service joins; services call each other or react to events |
-| H2 and in-memory stores by default | Anyone can run the project with just a JDK | They behave differently from MySQL and Redis, so everything is re-tested against the real stores |
-| Driver positions expire (TTL) | A driver whose app closed must not be offered rides | Redis uses a separate TTL key because GEO members can't expire individually |
-| Plain WebSocket + STOMP with a simple in-memory broker | Easy to run and test | One socket-service instance only; scaling out needs an external broker |
-| Review checks the booking over REST | Simple, and the rule stays in one place | A Kafka consumer would decouple the services; planned for Docker |
-| Unique constraint on review.bookingId | The database itself stops duplicate reviews | A second insert fails; the service checks first for a friendlier 409 |
-| Booking events behind an interface | Same code logs locally and publishes to Kafka in Docker | At-least-once delivery with no outbox: an event can be lost if the process dies between the DB write and the publish |
-| `ddl-auto=update` | Fast to develop against | Not for production; I'd switch to Flyway migrations |
-| Spring Boot 3.5.16 | Supports Java 17 to 25 | Boot 3.5 no longer gets free security patches; moving to Boot 4.x is a later upgrade |
-| Maven multi-module build | One parent POM pins versions for every service | A change to the library rebuilds its dependants |
-| React + Vite + Leaflet for the passenger UI | Fast dev server, free map tiles, no API key | Status polling is simpler than WebSocket but less instant; WebSocket push is planned |
+```sql
+USE uber_booking;
+SHOW CREATE TABLE booking;
+ALTER TABLE booking MODIFY COLUMN status
+ENUM('PENDING','CONFIRMED','IN_PROGRESS','COMPLETED','CANCELLED') NOT NULL;
+```
 
-## 10. Known gaps
+Do not blindly replace a different column definition. H2/fresh databases do not require this manual enum upgrade. The application uses ddl-auto=update; controlled Flyway migrations remain planned.
 
-- No refresh tokens or email verification, and only passengers can log in so far (driver login is not built).
-- The passenger UI polls booking status every 3 seconds instead of subscribing over WebSocket; live push is planned with the driver panel.
-- Booking only tries the single nearest driver. There is no timeout, no re-dispatch to the next driver if they ignore the ride, and the chosen driver (`candidateDriverId`) is returned on create but not stored, so `accept` does not check that the accepting driver is the one who was notified.
-- Booking driver ids must be numeric, while location accepts any string id.
-- The idempotency key is stored forever; production would add a TTL or cleanup job.
-- Review-service checks the booking synchronously over REST. If booking-service is down, reviews cannot be created (503). The Kafka-based flow is planned for the Docker stage.
-- No integration tests against real Redis, MySQL or Kafka (Testcontainers is planned for the Docker stage); the Kafka publisher and consumer have not been run yet.
-- The WebSocket flow is tested by hand in the browser page, not by an automated test.
-- The auth service creates tables for every entity in the shared library, not just `passenger`.
-- Default JWT secret in `application.properties` / `application.yml` is for local use only. Set `JWT_SECRET` anywhere else.
-- On Windows PowerShell 5.1 the `health status is UP` line in some smoke tests reports a false failure (the Actuator content type comes back as bytes).
+## 8. Review flow
 
-## 11. Roadmap
+Review-service reads booking-service over REST, checks COMPLETED status, compares the supplied passenger id with the booking and rejects duplicate reviews. Ratings are 1-5. Comparing supplied ids is not equivalent to authenticating booking ownership; caller-bound passenger authorization remains required.
 
-8. **React passenger frontend**: DONE — login, Leaflet map booking, status polling, my rides.
-9. **Driver panel + live push**: driver login, go online, position updates, WebSocket subscription for ride requests and booking status.
-10. **Docker**: Compose for every service with MySQL, Redis and Kafka, a Kafka consumer in review-service, and a full Docker test guide.
+## 9. Validation and local tests
+
+Stop running JARs before clean builds on Windows. Run .\scripts\mvn.ps1 clean install with tests enabled, and npm run build inside frontend. Start Eureka and backend services; use real MySQL/Redis profiles when validating those stores.
+
+BookingServiceTest, OfferServiceTest, DriverRideControllerTest and JwtAuthFilterTest cover selected service/controller/filter behavior with mocks. They do not establish database concurrency guarantees.
+
+With the gateway running without its Redis rate-limit profile:
+
+```powershell
+.\scripts\smoke-test-driver-flow.ps1
+.\scripts\smoke-test-driver-flow.ps1 -IncludeExpiry
+```
+
+The script creates persistent local test accounts/bookings, uses Delhi coordinates, and normally removes its test driver locations at the end. A crashed run may skip cleanup. Other online drivers near those coordinates can interfere. Expected successful totals are 37 checks without expiry or 41 with expiry, both with zero failed. Use disposable local data; these scripts are not for production.
+
+Manual UI verification: go online as a driver, book nearby as a passenger, accept, start, complete, inspect both histories, reject a subsequent request, let another expire, and verify DELETE on offline. Repeat with two driver accounts in isolated browser sessions to observe reassignment. Polling and heartbeat requests should be inspected separately from build success.
+
+## 10. Trade-offs and remaining roadmap
+
+- JWT verification at the edge simplifies local services but needs service-level authentication, network isolation, refresh/revocation and caller-bound ownership checks.
+- One-driver-at-a-time dispatch is easy to follow but incurs timeout latency; atomic reservation and distributed scheduling must precede scale-out.
+- Separate databases avoid cross-service joins but introduce synchronous REST dependencies and shared-entity compile-time coupling.
+- Redis GEO plus TTL supports proximity lookup, not guaranteed ride availability; booking checks activity separately.
+- React polling avoids socket-session complexity but adds latency and background traffic. Browser closure, logout paths and in-flight heartbeat/offline races need stronger lifecycle handling.
+- Driver approval, persisted place names, pagination, offer-query indexes, stale-booking recovery, scoped idempotency and automated browser tests remain work.
+- Legacy smoke scripts may assume passenger-authorized location writes or unrestricted legacy accepts; those assumptions are obsolete.
+- Next hardening work: passenger ownership, atomic dispatch reservations, Flyway, WebSocket UI delivery and outbox-based events.
+- Final deployment work: complete Docker Compose, Redis/MySQL/Kafka integration verification, Testcontainers and an operational runbook.
