@@ -2,8 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import MapView from './components/MapView.jsx'
 import usePlace from './usePlace.js'
-import DriverApp from './driver/DriverApp.jsx'
-import api, { getToken, clearAuth, login, signup, getBooking, myBookings, createBooking, cancelBooking, completeBooking } from './api.js'
+import api, { getToken, clearAuth, login, signup, getBooking, myBookings, createBooking, cancelBooking } from './api.js'
 const errorText = e => {
   const data = e.response?.data
   if (data?.message) return data.message
@@ -11,6 +10,18 @@ const errorText = e => {
   return data?.error || e.message || 'Request failed. Please try again.'
 }
 const terminal = status => ['COMPLETED', 'CANCELLED'].includes(status)
+const cancellable = status => ['PENDING', 'CONFIRMED'].includes(status)
+const cancelText = reason => ({
+  NO_DRIVER_AVAILABLE: 'No driver accepted your ride. Please try again.',
+  NO_DRIVERS_NEARBY: 'There were no drivers nearby.',
+  CANCELLED_BY_PASSENGER: 'You cancelled this ride.',
+  BOOKING_FAILED: 'We could not place this ride. Please try again.',
+}[reason] || reason)
+const rideHint = status => ({
+  PENDING: 'Waiting for a nearby driver to accept. This page updates automatically.',
+  CONFIRMED: 'A driver accepted your ride and is on the way.',
+  IN_PROGRESS: 'Your trip is in progress. The driver completes it at the destination.',
+}[status] || 'This journey has ended.')
 const coords = p => p ? p.map(n => Number(n).toFixed(5)).join(', ') : 'Select on the map'
 function Place({ point, empty = 'Select on the map' }) {
   const { place, loading } = usePlace(point)
@@ -81,7 +92,7 @@ function Ride() {
     setBusy(true); setError(''); generation.current++
     try { await action(id); const { data } = await getBooking(id); setRide(data) } catch (e) { setError(errorText(e)) } finally { setBusy(false) }
   }
-  return <section className="content-card card"><Link to="/bookings">← My rides</Link><p className="eyebrow">YOUR JOURNEY</p><h1>Ride #{id}</h1>{error && <p className="error" role="alert">{error}</p>}{!ride ? <p role="status">Loading ride…</p> : <><span className={`chip ${ride.status}`}>{ride.status}</span><ol className="timeline">{['PENDING', 'CONFIRMED', 'COMPLETED'].map(s => <li key={s} className={s === ride.status ? 'active' : ''}>{s}</li>)}</ol>{ride.driverId && <p>Driver #{ride.driverId}</p>}{ride.cancelReason && <p>{ride.cancelReason}</p>}<p className="muted">Pickup: <Place point={[ride.pickupLatitude, ride.pickupLongitude]} empty="Not available" /></p><p className="muted">Destination: <Place point={[ride.dropLatitude, ride.dropLongitude]} empty="Not available" /></p><div className="actions">{!terminal(ride.status) && <button className="secondary" disabled={busy} onClick={() => act(cancelBooking)}>Cancel ride</button>}{ride.status === 'CONFIRMED' && <button disabled={busy} onClick={() => act(completeBooking)}>Complete ride</button>}</div><p className="hint">{terminal(ride.status) ? 'This journey has ended.' : 'Status updates automatically. Driver acceptance is handled outside this passenger app.'}</p></>}</section>
+  return <section className="content-card card"><Link to="/bookings">← My rides</Link><p className="eyebrow">YOUR JOURNEY</p><h1>Ride #{id}</h1>{error && <p className="error" role="alert">{error}</p>}{!ride ? <p role="status">Loading ride…</p> : <><span className={`chip ${ride.status}`}>{ride.status}</span><ol className="timeline">{['PENDING', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED'].map(s => <li key={s} className={s === ride.status ? 'active' : ''}>{s}</li>)}</ol>{ride.driverId && <p>Driver #{ride.driverId}</p>}{ride.cancelReason && <p>{cancelText(ride.cancelReason)}</p>}<p className="muted">Pickup: <Place point={[ride.pickupLatitude, ride.pickupLongitude]} empty="Not available" /></p><p className="muted">Destination: <Place point={[ride.dropLatitude, ride.dropLongitude]} empty="Not available" /></p><div className="actions">{cancellable(ride.status) && <button className="secondary" disabled={busy} onClick={() => act(cancelBooking)}>Cancel ride</button>}</div><p className="hint">{rideHint(ride.status)}</p></>}</section>
 }
 function History({ user }) {
   const [rides, setRides] = useState(null), [error, setError] = useState('')
@@ -100,5 +111,5 @@ export default function App() {
     return () => { alive = false; window.removeEventListener('session-expired', expired) }
   }, [])
   function protect(screen) { return checking ? <p className="content-card" role="status">Checking session…</p> : user ? screen : <Navigate to="/login" replace /> }
-  return <div className="app"><header className="topbar"><Link className="brand" to="/book">ride<span>.</span></Link><nav aria-label="Main navigation"><Link to="/book">Book a ride</Link><Link to="/bookings">My rides</Link></nav><div className="account">{user ? <><span className="username">{user.name || user.email}</span><button className="secondary" onClick={() => { clearAuth(); setUser(null); navigate('/book') }}>Log out</button></> : <Link className="login-link" to="/login">Log in / Sign up</Link>}</div></header>{notice && <div className="notice" role="status">{notice}</div>}<main><Routes><Route path="/" element={<Navigate to="/book" replace />} /><Route path="/book" element={<Book user={user} checking={checking} />} /><Route path="/login" element={<Auth onLogin={u => { setUser(u); setNotice('') }} />} /><Route path="/bookings" element={protect(<History user={user} />)} /><Route path="/rides/:id" element={protect(<Ride />)} /><Route path="/driver/*" element={<DriverApp />} /><Route path="*" element={<Navigate to="/book" replace />} /></Routes></main><footer>Ride Platform · Passenger preview · Local development</footer></div>
+  return <div className="app"><header className="topbar"><Link className="brand" to="/book">ride<span>.</span></Link><nav aria-label="Main navigation"><Link to="/book">Book a ride</Link><Link to="/bookings">My rides</Link></nav><div className="account">{user ? <><span className="username">{user.name || user.email}</span><button className="secondary" onClick={() => { clearAuth(); setUser(null); navigate('/book') }}>Log out</button></> : <Link className="login-link" to="/login">Log in / Sign up</Link>}</div></header>{notice && <div className="notice" role="status">{notice}</div>}<main><Routes><Route path="/" element={<Navigate to="/book" replace />} /><Route path="/book" element={<Book user={user} checking={checking} />} /><Route path="/login" element={<Auth onLogin={u => { setUser(u); setNotice('') }} />} /><Route path="/bookings" element={protect(<History user={user} />)} /><Route path="/rides/:id" element={protect(<Ride />)} /><Route path="*" element={<Navigate to="/book" replace />} /></Routes></main><footer>Ride Platform · Passenger preview · Local development</footer></div>
 }

@@ -86,3 +86,37 @@ export async function updateDriverLocation(driverId, payload) {
   )
   return data
 }
+
+export async function removeDriverLocation(driverId) {
+  await driverApi.delete(`/api/v1/locations/drivers/${driverId}`)
+}
+
+export async function getDashboard() {
+  const { data } = await driverApi.get('/api/v1/driver/dashboard')
+  return data
+}
+
+export async function acceptOffer(offerId) {
+  const { data } = await driverApi.post(`/api/v1/driver/offers/${offerId}/accept`)
+  return data
+}
+
+export async function rejectOffer(offerId) {
+  const { data } = await driverApi.post(`/api/v1/driver/offers/${offerId}/reject`)
+  return data
+}
+
+export async function startRide(bookingId) {
+  const { data } = await driverApi.post(`/api/v1/driver/rides/${bookingId}/start`)
+  return data
+}
+
+export async function completeRide(bookingId) {
+  const { data } = await driverApi.post(`/api/v1/driver/rides/${bookingId}/complete`)
+  return data
+}
+
+export async function getDriverHistory() {
+  const { data } = await driverApi.get('/api/v1/driver/rides')
+  return data
+}

@@ -20,11 +20,13 @@ function Controls({ pickup, dropoff, center, onClick }) {
   useEffect(() => { if (center) map.setView(center, 15) }, [map, center])
   return null
 }
-export default function MapView({ pickup, dropoff, onClick }) {
+// pickupLabel and hideAvailability are optional. The passenger app uses the defaults; the driver portal
+// labels its own position and hides the passenger-only nearby-driver badge.
+export default function MapView({ pickup, dropoff, onClick, pickupLabel = 'Pickup', hideAvailability = false }) {
   const [center, setCenter] = useState(null)
   const [message, setMessage] = useState('')
   const [locating, setLocating] = useState(false)
-  const { drivers, status } = useNearbyDrivers(pickup)
+  const { drivers, status } = useNearbyDrivers(hideAvailability ? null : pickup)
   const count = drivers.length
   const availability = status === 'idle' ? 'Select a pickup to find drivers'
     : status === 'signed-out' ? 'Log in to see nearby drivers'
@@ -46,11 +48,11 @@ export default function MapView({ pickup, dropoff, onClick }) {
       {drivers.map(driver => <Marker key={driver.driverId} position={[driver.latitude, driver.longitude]} icon={carIcon} title={`Driver ${driver.driverId}`} bubblingMouseEvents={false}>
         <Popup><strong>Driver #{driver.driverId}</strong><br />{Number.isFinite(driver.distanceKm) ? `${driver.distanceKm.toFixed(2)} km from pickup` : 'Nearby reported position'}<br /><small>Reported location, not a guaranteed available ride.</small></Popup>
       </Marker>)}
-      {pickup && <CircleMarker center={pickup} radius={10} pathOptions={{ color: '#fff', fillColor: '#087f5b', fillOpacity: 1 }}><Tooltip permanent>Pickup</Tooltip></CircleMarker>}
+      {pickup && <CircleMarker center={pickup} radius={10} pathOptions={{ color: '#fff', fillColor: '#087f5b', fillOpacity: 1 }}><Tooltip permanent>{pickupLabel}</Tooltip></CircleMarker>}
       {dropoff && <CircleMarker center={dropoff} radius={10} pathOptions={{ color: '#fff', fillColor: '#222', fillOpacity: 1 }}><Tooltip permanent>Destination</Tooltip></CircleMarker>}
       {pickup && dropoff && <Polyline positions={[pickup, dropoff]} pathOptions={{ color: '#087f5b', dashArray: '6 8' }} />}
     </MapContainer>
-    <div style={badgeStyle} role="status" aria-live="polite"><strong>{availability}</strong>{status === 'ready' && <small style={{ display: 'block', marginTop: 4 }}>Within 5 km · refreshes about every 10 s</small>}</div>
+    {!hideAvailability && <div style={badgeStyle} role="status" aria-live="polite"><strong>{availability}</strong>{status === 'ready' && <small style={{ display: 'block', marginTop: 4 }}>Within 5 km · refreshes about every 10 s</small>}</div>}
     <div className="map-tools"><button className="secondary" onClick={locate} disabled={locating}>{locating ? 'Locating…' : '◎ Use my location'}</button>{message && <p role="status">{message}</p>}</div>
   </section>
 }
