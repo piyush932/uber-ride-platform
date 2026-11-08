@@ -1,29 +1,50 @@
-# FINAL STEP. Not needed for local runs.
-# Starts MySQL, Eureka and auth. Redis and Kafka start with: docker compose --profile full up -d redis kafka
+# Full local stack. Setup and verification: docs/DOCKER.md
+# Only the gateway (8080), the frontend (5173) and the Eureka dashboard (8761) are published, and only on
+# 127.0.0.1. Every other service is reachable only on the internal Docker network.
+name: uber-ride-platform
+
+x-java-health: &java-health
+  interval: 10s
+  timeout: 5s
+  retries: 12
+  start_period: 60s
+
+x-eureka: &eureka
+  EUREKA_URL: http://eureka-server:8761/eureka
+
+x-database: &database
+  DB_HOST: mysql
+  DB_USER: root
+  DB_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+
 services:
   mysql:
     image: mysql:8.0
+    restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: root
-    ports:
-      - "3306:3306"
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 12
+      start_period: 30s
 
   redis:
     image: redis:7-alpine
-    profiles: ["full"]
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
 
   kafka:
     image: redpandadata/redpanda:latest
-    profiles: ["full"]
+    profiles: ["kafka"]
+    restart: unless-stopped
     command:
       - redpanda
       - start
@@ -33,37 +54,149 @@ services:
       - --reserve-memory=0M
       - --node-id=0
       - --check=false
-      - --kafka-addr=internal://0.0.0.0:29092,external://0.0.0.0:9092
-      - --advertise-kafka-addr=internal://kafka:29092,external://localhost:9092
-    ports:
-      - "9092:9092"
+      - --kafka-addr=internal://0.0.0.0:29092
+      - --advertise-kafka-addr=internal://kafka:29092
 
   eureka-server:
     build:
       context: ./backend
       args:
         MODULE: eureka-server
+    restart: unless-stopped
     ports:
-      - "8761:8761"
+      - "127.0.0.1:8761:8761"
+    healthcheck:
+      <<: *java-health
+      test: ["CMD", "curl", "-fsS", "http://localhost:8761/"]
 
   auth-service:
     build:
       context: ./backend
       args:
         MODULE: auth-service
-    ports:
-      - "8081:8081"
+    restart: unless-stopped
     environment:
+      <<: [*eureka, *database]
       SPRING_PROFILES_ACTIVE: mysql
-      DB_HOST: mysql
-      EUREKA_URL: http://eureka-server:8761/eureka
-      JWT_SECRET: local-docker-secret-please-change-local-docker-secret
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (at least 32 characters)}
     depends_on:
       mysql:
         condition: service_healthy
       eureka-server:
-        condition: service_started
-    restart: on-failure
+        condition: service_healthy
+    healthcheck:
+      <<: *java-health
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/actuator/health"]
+
+  location-service:
+    build:
+      context: ./backend
+      args:
+        MODULE: location-service
+    restart: unless-stopped
+    environment:
+      <<: *eureka
+      SPRING_PROFILES_ACTIVE: redis
+      REDIS_HOST: redis
+      LOCATION_TTL_SECONDS: ${LOCATION_TTL_SECONDS:-300}
+    depends_on:
+      redis:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    healthcheck:
+      <<: *java-health
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/actuator/health"]
+
+  socket-service:
+    build:
+      context: ./backend
+      args:
+        MODULE: socket-service
+    restart: unless-stopped
+    environment:
+      <<: *eureka
+      BOOKING_SERVICE_URL: http://booking-service:8084
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+    healthcheck:
+      <<: *java-health
+      test: ["CMD", "curl", "-fsS", "http://localhost:8083/actuator/health"]
+
+  booking-service:
+    build:
+      context: ./backend
+      args:
+        MODULE: booking-service
+    restart: unless-stopped
+    environment:
+      <<: [*eureka, *database]
+      SPRING_PROFILES_ACTIVE: ${BOOKING_PROFILES:-mysql}
+      LOCATION_SERVICE_URL: http://location-service:8082
+      SOCKET_SERVICE_URL: http://socket-service:8083
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      BOOKING_OFFER_TTL_SECONDS: ${BOOKING_OFFER_TTL_SECONDS:-20}
+      BOOKING_OFFER_MAX_ATTEMPTS: ${BOOKING_OFFER_MAX_ATTEMPTS:-5}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    healthcheck:
+      <<: *java-health
+      test: ["CMD", "curl", "-fsS", "http://localhost:8084/actuator/health"]
+
+  review-service:
+    build:
+      context: ./backend
+      args:
+        MODULE: review-service
+    restart: unless-stopped
+    environment:
+      <<: [*eureka, *database]
+      SPRING_PROFILES_ACTIVE: mysql
+      BOOKING_SERVICE_URL: http://booking-service:8084
+    depends_on:
+      mysql:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    healthcheck:
+      <<: *java-health
+      test: ["CMD", "curl", "-fsS", "http://localhost:8085/actuator/health"]
+
+  api-gateway:
+    build:
+      context: ./backend
+      args:
+        MODULE: api-gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      <<: *eureka
+      SPRING_PROFILES_ACTIVE: ${GATEWAY_PROFILES:-}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (at least 32 characters)}
+      REDIS_HOST: redis
+    depends_on:
+      redis:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    healthcheck:
+      <<: *java-health
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5173:8080"
+    depends_on:
+      api-gateway:
+        condition: service_healthy
 
 volumes:
   mysql-data:
